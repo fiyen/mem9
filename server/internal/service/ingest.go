@@ -444,8 +444,47 @@ func (s *IngestService) extractFacts(ctx context.Context, conversation string) (
 		return nil, nil
 	}
 
-	currentDate := time.Now().Format("2006-01-02")
+	systemPrompt, userPrompt := buildExtractFactsPrompts(conversation, time.Now())
 
+	type extractResponse struct {
+		Facts []ExtractedFact `json:"facts"`
+	}
+
+	raw, err := s.llm.CompleteJSON(ctx, systemPrompt, userPrompt)
+	if err != nil {
+		return nil, fmt.Errorf("extraction LLM call: %w", err)
+	}
+
+	parsed, err := llm.ParseJSON[extractResponse](raw)
+	lastRaw := raw
+	if err != nil {
+		raw2, retryErr := s.llm.CompleteJSON(ctx, systemPrompt, buildJSONRepairPrompt(userPrompt, raw, err))
+		if retryErr != nil {
+			return nil, fmt.Errorf("extraction retry: %w", retryErr)
+		}
+		parsed, err = llm.ParseJSON[extractResponse](raw2)
+		if err != nil {
+			if recovered := normalizeParsedFacts(raw2, nil); len(recovered) > 0 {
+				facts := dropQueryIntentFacts(recovered)
+				slog.Info("facts extracted", "facts", len(facts))
+				return facts, nil
+			}
+			if s.llm.DebugLLM() {
+				slog.Error("json parse llm resp failed", "len", len(raw2), "raw", raw2, "err", err)
+			} else {
+				slog.Error("json parse llm resp failed", "len", len(raw2), "err", err)
+			}
+			return nil, fmt.Errorf("extraction parse after retry: %w", err)
+		}
+		lastRaw = raw2
+	}
+
+	facts := dropQueryIntentFacts(normalizeParsedFacts(lastRaw, parsed.Facts))
+	slog.Info("facts extracted", "facts", len(facts))
+	return facts, nil
+}
+
+func buildExtractFactsPrompts(conversation string, now time.Time) (string, string) {
 	systemPrompt := `You are an information extraction engine. Your task is to identify distinct,
 atomic facts from a conversation.
 
@@ -503,52 +542,86 @@ Return ONLY valid JSON. No markdown fences, no explanation.
 
 {"facts": [{"text": "fact one", "tags": ["tag1", "tag2"], "fact_type": "fact"}, {"text": "User asked about X", "fact_type": "query_intent"}, ...]}`
 
-	userPrompt := fmt.Sprintf("Extract facts. Today's date is %s.\n\n%s", currentDate, conversation)
+	userPrompt := strings.Join([]string{
+		"Extract facts from the conversation below.",
+		"Conversation transcript:",
+		conversation,
+		"Reference date (use only when temporal context matters): " + now.Format("2006-01-02"),
+	}, "\n\n")
+	return systemPrompt, userPrompt
+}
+
+// extractFactsAndTags calls the LLM to extract atomic facts and per-message tags
+// from the conversation in a single call.
+func (s *IngestService) extractFactsAndTags(ctx context.Context, conversation string, messageCount int) ([]ExtractedFact, [][]string, error) {
+	systemPrompt, userPrompt := buildExtractFactsAndTagsPrompts(conversation, messageCount, time.Now())
 
 	type extractResponse struct {
-		Facts []ExtractedFact `json:"facts"`
+		Facts       []ExtractedFact `json:"facts"`
+		MessageTags [][]string      `json:"message_tags"`
 	}
 
 	raw, err := s.llm.CompleteJSON(ctx, systemPrompt, userPrompt)
 	if err != nil {
-		return nil, fmt.Errorf("extraction LLM call: %w", err)
+		return nil, nil, fmt.Errorf("extraction LLM call: %w", err)
 	}
 
 	parsed, err := llm.ParseJSON[extractResponse](raw)
 	lastRaw := raw
 	if err != nil {
-		raw2, retryErr := s.llm.CompleteJSON(ctx, systemPrompt,
-			"Your previous response was invalid JSON:\n"+raw+"\n\nFix it and return ONLY the corrected JSON object.\n\n"+userPrompt)
+		raw2, retryErr := s.llm.CompleteJSON(ctx, systemPrompt, buildJSONRepairPrompt(userPrompt, raw, err))
 		if retryErr != nil {
-			return nil, fmt.Errorf("extraction retry: %w", retryErr)
+			return nil, nil, fmt.Errorf("extraction retry: %w", retryErr)
 		}
 		parsed, err = llm.ParseJSON[extractResponse](raw2)
 		if err != nil {
 			if recovered := normalizeParsedFacts(raw2, nil); len(recovered) > 0 {
 				facts := dropQueryIntentFacts(recovered)
-				slog.Info("facts extracted", "facts", len(facts))
-				return facts, nil
+				type legacyFull struct {
+					MessageTags [][]string `json:"message_tags"`
+				}
+				var leg legacyFull
+				if legErr := json.Unmarshal([]byte(llm.StripMarkdownFences(raw2)), &leg); legErr != nil {
+					slog.Debug("extractFactsAndTags: legacy message_tags decode failed, returning empty", "err", legErr)
+				}
+				messageTags := make([][]string, messageCount)
+				for i := range messageTags {
+					if i < len(leg.MessageTags) && leg.MessageTags[i] != nil {
+						messageTags[i] = leg.MessageTags[i]
+					} else {
+						messageTags[i] = []string{}
+					}
+				}
+				slog.Info("facts and tags extracted", "facts", len(facts), "tagged_messages", messageCount)
+				return facts, messageTags, nil
 			}
 			if s.llm.DebugLLM() {
 				slog.Error("json parse llm resp failed", "len", len(raw2), "raw", raw2, "err", err)
 			} else {
 				slog.Error("json parse llm resp failed", "len", len(raw2), "err", err)
 			}
-			return nil, fmt.Errorf("extraction parse after retry: %w", err)
+			return nil, nil, fmt.Errorf("extraction parse after retry: %w", err)
 		}
 		lastRaw = raw2
 	}
 
 	facts := dropQueryIntentFacts(normalizeParsedFacts(lastRaw, parsed.Facts))
-	slog.Info("facts extracted", "facts", len(facts))
-	return facts, nil
+
+	// Normalise message_tags to exactly messageCount entries.
+	messageTags := make([][]string, messageCount)
+	for i := range messageTags {
+		if i < len(parsed.MessageTags) && parsed.MessageTags[i] != nil {
+			messageTags[i] = parsed.MessageTags[i]
+		} else {
+			messageTags[i] = []string{}
+		}
+	}
+
+	slog.Info("facts and tags extracted", "facts", len(facts), "tagged_messages", messageCount)
+	return facts, messageTags, nil
 }
 
-// extractFactsAndTags calls the LLM to extract atomic facts and per-message tags
-// from the conversation in a single call.
-func (s *IngestService) extractFactsAndTags(ctx context.Context, conversation string, messageCount int) ([]ExtractedFact, [][]string, error) {
-	currentDate := time.Now().Format("2006-01-02")
-
+func buildExtractFactsAndTagsPrompts(conversation string, messageCount int, now time.Time) (string, string) {
 	systemPrompt := `You are an information extraction engine. Your task is to identify distinct,
 atomic facts from a conversation AND assign short descriptive tags to each message.
 
@@ -633,72 +706,55 @@ Return ONLY valid JSON. No markdown fences, no explanation.
 
 {"facts": [{"text": "fact one", "tags": ["tag1", "tag2"], "fact_type": "fact"}, {"text": "User asked about X", "fact_type": "query_intent"}], "message_tags": [["tag1", "tag2"], ["tag3"], [], ...]}`
 
-	userPrompt := fmt.Sprintf("Extract facts and assign message tags. Today's date is %s.\n\n%s", currentDate, conversation)
+	userPrompt := strings.Join([]string{
+		"Extract facts and assign message tags for the conversation below.",
+		"Conversation transcript:",
+		conversation,
+		fmt.Sprintf("Expected message_tags entries: %d", messageCount),
+		"Reference date (use only when temporal context matters): " + now.Format("2006-01-02"),
+	}, "\n\n")
+	return systemPrompt, userPrompt
+}
 
-	type extractResponse struct {
-		Facts       []ExtractedFact `json:"facts"`
-		MessageTags [][]string      `json:"message_tags"`
+func buildReconcilePrompt(refsJSON, factsJSON []byte) string {
+	return strings.Join([]string{
+		"Current memory contents:",
+		string(refsJSON),
+		"New facts extracted from recent conversation:",
+		string(factsJSON),
+		"Analyze the new facts and determine whether each should be added, updated, or deleted in memory. Return the full memory state after reconciliation.",
+	}, "\n\n")
+}
+
+func buildJSONRepairPrompt(originalPrompt, raw string, parseErr error) string {
+	var suffix []string
+	suffix = append(suffix,
+		originalPrompt,
+		"Your previous response was invalid JSON. Re-run the same task and return ONLY the corrected JSON object.",
+		"JSON parse error summary: "+compactPromptError(parseErr),
+	)
+	if excerpt := truncatePromptContext(raw, 600); excerpt != "" {
+		suffix = append(suffix, "Previous response excerpt (truncated):\n"+excerpt)
 	}
+	return strings.Join(suffix, "\n\n")
+}
 
-	raw, err := s.llm.CompleteJSON(ctx, systemPrompt, userPrompt)
-	if err != nil {
-		return nil, nil, fmt.Errorf("extraction LLM call: %w", err)
+func compactPromptError(err error) string {
+	if err == nil {
+		return "unknown parse error"
 	}
+	return strings.Join(strings.Fields(err.Error()), " ")
+}
 
-	parsed, err := llm.ParseJSON[extractResponse](raw)
-	lastRaw := raw
-	if err != nil {
-		raw2, retryErr := s.llm.CompleteJSON(ctx, systemPrompt,
-			"Your previous response was invalid JSON:\n"+raw+"\n\nFix it and return ONLY the corrected JSON object.\n\n"+userPrompt)
-		if retryErr != nil {
-			return nil, nil, fmt.Errorf("extraction retry: %w", retryErr)
-		}
-		parsed, err = llm.ParseJSON[extractResponse](raw2)
-		if err != nil {
-			if recovered := normalizeParsedFacts(raw2, nil); len(recovered) > 0 {
-				facts := dropQueryIntentFacts(recovered)
-				type legacyFull struct {
-					MessageTags [][]string `json:"message_tags"`
-				}
-				var leg legacyFull
-				if legErr := json.Unmarshal([]byte(llm.StripMarkdownFences(raw2)), &leg); legErr != nil {
-					slog.Debug("extractFactsAndTags: legacy message_tags decode failed, returning empty", "err", legErr)
-				}
-				messageTags := make([][]string, messageCount)
-				for i := range messageTags {
-					if i < len(leg.MessageTags) && leg.MessageTags[i] != nil {
-						messageTags[i] = leg.MessageTags[i]
-					} else {
-						messageTags[i] = []string{}
-					}
-				}
-				slog.Info("facts and tags extracted", "facts", len(facts), "tagged_messages", messageCount)
-				return facts, messageTags, nil
-			}
-			if s.llm.DebugLLM() {
-				slog.Error("json parse llm resp failed", "len", len(raw2), "raw", raw2, "err", err)
-			} else {
-				slog.Error("json parse llm resp failed", "len", len(raw2), "err", err)
-			}
-			return nil, nil, fmt.Errorf("extraction parse after retry: %w", err)
-		}
-		lastRaw = raw2
+func truncatePromptContext(raw string, limit int) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || limit <= 0 {
+		return ""
 	}
-
-	facts := dropQueryIntentFacts(normalizeParsedFacts(lastRaw, parsed.Facts))
-
-	// Normalise message_tags to exactly messageCount entries.
-	messageTags := make([][]string, messageCount)
-	for i := range messageTags {
-		if i < len(parsed.MessageTags) && parsed.MessageTags[i] != nil {
-			messageTags[i] = parsed.MessageTags[i]
-		} else {
-			messageTags[i] = []string{}
-		}
+	if utf8.RuneCountInString(raw) <= limit {
+		return raw
 	}
-
-	slog.Info("facts and tags extracted", "facts", len(facts), "tagged_messages", messageCount)
-	return facts, messageTags, nil
+	return truncateRunes(raw, limit) + "\n...[truncated]"
 }
 
 // reconcile searches relevant memories for each fact, deduplicates, then sends
@@ -828,15 +884,7 @@ Return ONLY valid JSON. No markdown fences.
   ]
 }`
 
-	userPrompt := fmt.Sprintf(`Current memory contents:
-
-%s
-
-New facts extracted from recent conversation:
-
-%s
-
-Analyze the new facts and determine whether each should be added, updated, or deleted in memory. Return the full memory state after reconciliation.`, string(refsJSON), string(factsJSON))
+	userPrompt := buildReconcilePrompt(refsJSON, factsJSON)
 
 	raw, err := s.llm.CompleteJSON(ctx, systemPrompt, userPrompt)
 	if err != nil {
@@ -858,8 +906,7 @@ Analyze the new facts and determine whether each should be added, updated, or de
 	parsed, err := llm.ParseJSON[reconcileResponse](raw)
 	if err != nil {
 		// Retry once.
-		raw2, retryErr := s.llm.CompleteJSON(ctx, systemPrompt,
-			"Your previous response was not valid JSON. Return ONLY the JSON object.\n\n"+userPrompt)
+		raw2, retryErr := s.llm.CompleteJSON(ctx, systemPrompt, buildJSONRepairPrompt(userPrompt, raw, err))
 		if retryErr != nil {
 			slog.Warn("reconciliation retry failed, skipping to avoid duplicates", "err", retryErr)
 			return nil, 1, nil // warnings=1 signals that facts were extracted but reconciliation was skipped

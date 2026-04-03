@@ -113,13 +113,13 @@ func TestParseJSON(t *testing.T) {
 }
 
 func TestComplete(t *testing.T) {
-	t.Run("success", func(t *testing.T) {
+	t.Run("success via responses api", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				t.Fatalf("method = %s, want POST", r.Method)
 			}
-			if r.URL.Path != "/chat/completions" {
-				t.Fatalf("path = %s, want /chat/completions", r.URL.Path)
+			if r.URL.Path != "/responses" {
+				t.Fatalf("path = %s, want /responses", r.URL.Path)
 			}
 			if got := r.Header.Get("Authorization"); got != "Bearer key" {
 				t.Fatalf("Authorization header = %q, want %q", got, "Bearer key")
@@ -128,25 +128,25 @@ func TestComplete(t *testing.T) {
 				t.Fatalf("Content-Type header = %q, want %q", got, "application/json")
 			}
 
-			var req chatRequest
+			var req responsesRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatalf("decode request: %v", err)
 			}
 			if req.Model != "test-model" {
 				t.Fatalf("model = %q, want %q", req.Model, "test-model")
 			}
-			if len(req.Messages) != 2 || req.Messages[0].Role != "system" || req.Messages[1].Role != "user" {
-				t.Fatalf("unexpected messages: %#v", req.Messages)
+			if len(req.Input) != 2 || req.Input[0].Role != "system" || req.Input[1].Role != "user" {
+				t.Fatalf("unexpected input: %#v", req.Input)
 			}
 			if req.Temperature != 0.1 {
 				t.Fatalf("temperature = %v, want %v", req.Temperature, 0.1)
 			}
-			if req.EnableThinking != nil {
-				t.Fatalf("enable_thinking = %v, want nil", *req.EnableThinking)
+			if req.PromptCacheKey == "" {
+				t.Fatal("prompt_cache_key should not be empty")
 			}
 
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hello"}}]}`))
+			_, _ = w.Write([]byte(`{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":12,"output_tokens":4,"total_tokens":16,"input_tokens_details":{"cached_tokens":8}}}`))
 		}))
 		defer server.Close()
 
@@ -164,6 +164,42 @@ func TestComplete(t *testing.T) {
 		}
 	})
 
+	t.Run("fallback to chat completions when responses unsupported", func(t *testing.T) {
+		requestPaths := make([]string, 0, 2)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestPaths = append(requestPaths, r.URL.Path)
+			switch r.URL.Path {
+			case "/responses":
+				http.Error(w, `{"error":{"message":"unsupported"}}`, http.StatusNotFound)
+			case "/chat/completions":
+				var req chatRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Fatalf("decode request: %v", err)
+				}
+				if req.PromptCacheKey == "" {
+					t.Fatal("prompt_cache_key should be forwarded to chat fallback")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hello from fallback"}}]}`))
+			default:
+				t.Fatalf("unexpected path %s", r.URL.Path)
+			}
+		}))
+		defer server.Close()
+
+		client := New(Config{APIKey: "key", BaseURL: server.URL, Model: "test-model"})
+		got, err := client.Complete(context.Background(), "sys", "user")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "hello from fallback" {
+			t.Fatalf("content = %q, want %q", got, "hello from fallback")
+		}
+		if strings.Join(requestPaths, ",") != "/responses,/chat/completions" {
+			t.Fatalf("request paths = %v, want [/responses /chat/completions]", requestPaths)
+		}
+	})
+
 	t.Run("api error response", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -178,14 +214,18 @@ func TestComplete(t *testing.T) {
 		}
 	})
 
-	t.Run("empty choices", func(t *testing.T) {
+	t.Run("empty choices on chat path", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/chat/completions" {
+				http.Error(w, `{"error":{"message":"unsupported"}}`, http.StatusNotFound)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"choices":[]}`))
 		}))
 		defer server.Close()
 
-		client := New(Config{APIKey: "key", BaseURL: server.URL, Model: "test-model"})
+		client := New(Config{APIKey: "key", BaseURL: server.URL, Model: "qwen-plus"})
 		_, err := client.Complete(context.Background(), "sys", "user")
 		if err == nil || !strings.Contains(err.Error(), "llm returned no choices") {
 			t.Fatalf("expected empty choices error, got %v", err)
@@ -235,6 +275,22 @@ func TestComplete(t *testing.T) {
 			t.Fatalf("content = %q, want %q", got, "hello")
 		}
 	})
+}
+
+func TestBuildPromptCacheKey(t *testing.T) {
+	key1 := buildPromptCacheKey("You are an information extraction engine.\n\nExample", &responseFormat{Type: "json_object"})
+	key2 := buildPromptCacheKey("You are an information extraction engine.   \nExample", &responseFormat{Type: "json_object"})
+	key3 := buildPromptCacheKey("You are a memory management engine.", &responseFormat{Type: "json_object"})
+
+	if key1 != key2 {
+		t.Fatalf("expected normalized prompts to share cache key, got %q vs %q", key1, key2)
+	}
+	if key1 == key3 {
+		t.Fatalf("expected different prompt families to use different cache keys, both were %q", key1)
+	}
+	if !strings.HasPrefix(key1, "mnemos:v1:extract:json_object:") {
+		t.Fatalf("unexpected cache key prefix %q", key1)
+	}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

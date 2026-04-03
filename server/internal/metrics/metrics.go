@@ -70,6 +70,46 @@ var (
 		[]string{"model", "status"}, // status: "success" | "error"
 	)
 
+	// LLMInputTokens counts prompt/input tokens sent to the provider.
+	LLMInputTokens = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "mnemo",
+			Name:      "llm_input_tokens_total",
+			Help:      "Total prompt/input tokens sent to the LLM provider.",
+		},
+		[]string{"model", "endpoint"},
+	)
+
+	// LLMCachedInputTokens counts provider-reported cached prompt/input tokens.
+	LLMCachedInputTokens = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "mnemo",
+			Name:      "llm_cached_input_tokens_total",
+			Help:      "Total cached prompt/input tokens reported by the LLM provider.",
+		},
+		[]string{"model", "endpoint"},
+	)
+
+	// LLMOutputTokens counts completion/output tokens returned by the provider.
+	LLMOutputTokens = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "mnemo",
+			Name:      "llm_output_tokens_total",
+			Help:      "Total completion/output tokens returned by the LLM provider.",
+		},
+		[]string{"model", "endpoint"},
+	)
+
+	// LLMReasoningTokens counts provider-reported reasoning tokens.
+	LLMReasoningTokens = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "mnemo",
+			Name:      "llm_reasoning_tokens_total",
+			Help:      "Total reasoning tokens reported by the LLM provider.",
+		},
+		[]string{"model", "endpoint"},
+	)
+
 	// NearDupCosineScore observes the cosine similarity of the nearest existing
 	// memory to each extracted fact. Shadow mode only — facts always pass through
 	// to reconcile unchanged. Used to calibrate the near-dup suppression threshold.

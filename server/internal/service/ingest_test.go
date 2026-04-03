@@ -240,6 +240,47 @@ func TestExtractFactsAndTagsRetryFallbackDropsFlattenedQueryIntent(t *testing.T)
 	}
 }
 
+func TestBuildExtractFactsPromptsKeepsStablePrefix(t *testing.T) {
+	t.Parallel()
+
+	systemPrompt, userPrompt := buildExtractFactsPrompts("User: I use Go 1.22", time.Date(2026, 4, 3, 0, 0, 0, 0, time.UTC))
+	if !strings.Contains(systemPrompt, "information extraction engine") {
+		t.Fatalf("unexpected system prompt: %q", systemPrompt)
+	}
+	if !strings.HasPrefix(userPrompt, "Extract facts from the conversation below.") {
+		t.Fatalf("user prompt should start with stable instructions, got %q", userPrompt)
+	}
+	conversationPos := strings.Index(userPrompt, "User: I use Go 1.22")
+	datePos := strings.Index(userPrompt, "Reference date (use only when temporal context matters): 2026-04-03")
+	if conversationPos < 0 || datePos < 0 {
+		t.Fatalf("expected prompt to contain conversation and date, got %q", userPrompt)
+	}
+	if datePos < conversationPos {
+		t.Fatalf("expected date to appear after conversation, got %q", userPrompt)
+	}
+}
+
+func TestBuildJSONRepairPromptPreservesPrefixAndTruncatesRaw(t *testing.T) {
+	t.Parallel()
+
+	original := "Extract facts from the conversation below.\n\nConversation transcript:\n\nUser: hello"
+	raw := strings.Repeat("x", 700)
+
+	got := buildJSONRepairPrompt(original, raw, errors.New("invalid character 'x'"))
+	if !strings.HasPrefix(got, original) {
+		t.Fatalf("repair prompt should keep original prompt prefix, got %q", got)
+	}
+	if !strings.Contains(got, "JSON parse error summary: invalid character 'x'") {
+		t.Fatalf("repair prompt should contain compact error summary, got %q", got)
+	}
+	if !strings.Contains(got, "...[truncated]") {
+		t.Fatalf("repair prompt should include truncated marker, got %q", got)
+	}
+	if strings.Contains(got, raw) {
+		t.Fatal("repair prompt should not embed the full raw response")
+	}
+}
+
 func TestColdStartAddAllFactsSetsTags(t *testing.T) {
 	t.Parallel()
 
