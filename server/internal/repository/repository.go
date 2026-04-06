@@ -73,14 +73,19 @@ type UploadTaskRepo interface {
 // BulkCreate silently skips MySQL 1146 (table not yet migrated) at DEBUG level.
 type SessionRepo interface {
 	BulkCreate(ctx context.Context, sessions []*domain.Session) error
+	GetByID(ctx context.Context, id string) (*domain.Session, error)
+	ListBySessionID(ctx context.Context, sessionID string) ([]*domain.Session, error)
 	PatchTags(ctx context.Context, sessionID, contentHash string, tags []string) error
 	AutoVectorSearch(ctx context.Context, query string, f domain.MemoryFilter, limit int) ([]domain.Memory, error)
 	VectorSearch(ctx context.Context, queryVec []float32, f domain.MemoryFilter, limit int) ([]domain.Memory, error)
 	FTSSearch(ctx context.Context, query string, f domain.MemoryFilter, limit int) ([]domain.Memory, error)
 	KeywordSearch(ctx context.Context, query string, f domain.MemoryFilter, limit int) ([]domain.Memory, error)
 	FTSAvailable() bool
+	ListTraceEmbeddingsBySessionID(ctx context.Context, sessionID string) ([]*domain.SessionTraceEmbedding, error)
+	UpsertTraceEmbeddings(ctx context.Context, entries []*domain.SessionTraceEmbedding) error
+	TraceVectorSearch(ctx context.Context, sessionID, embeddingModel string, queryVec []float32, limit int) ([]domain.Memory, error)
 	// ListBySessionIDs returns raw session rows for the given session IDs, ordered by
 	// session_id ASC, created_at ASC, seq ASC, id ASC. At most limitPerSession rows are
-	// returned per session_id. Returns ErrNotSupported on non-TiDB backends.
+	// returned per session_id.
 	ListBySessionIDs(ctx context.Context, sessionIDs []string, limitPerSession int) ([]*domain.Session, error)
 }

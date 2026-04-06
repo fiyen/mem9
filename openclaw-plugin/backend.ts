@@ -1,5 +1,7 @@
 import type {
   Memory,
+  MemoryTraceResult,
+  RawSessionMessage,
   SearchResult,
   StoreResult,
   CreateMemoryInput,
@@ -16,6 +18,8 @@ export interface MemoryBackend {
   store(input: CreateMemoryInput): Promise<StoreResult>;
   search(input: SearchInput): Promise<SearchResult>;
   get(id: string): Promise<Memory | null>;
+  trace(id: string, q?: string, limit?: number): Promise<MemoryTraceResult>;
+  getOriginal(id: string): Promise<RawSessionMessage | null>;
   update(id: string, input: UpdateMemoryInput): Promise<Memory | null>;
   remove(id: string): Promise<boolean>;
 

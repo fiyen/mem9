@@ -151,6 +151,12 @@ func (s *Server) ingestMessages(ctx context.Context, auth *domain.AuthInfo, svc 
 			"cluster_id", auth.ClusterID, "session", req.SessionID, "err", err)
 	}
 
+	// Respect explicit raw mode and no-LLM deployments by delegating to IngestService,
+	// which already handles ModeRaw / nil LLM short-circuiting.
+	if req.Mode == service.ModeRaw || !svc.ingest.HasLLM() {
+		return svc.ingest.Ingest(ctx, auth.AgentName, req)
+	}
+
 	phase1, err := svc.ingest.ExtractPhase1(ctx, req.Messages)
 	if err != nil {
 		slog.Error("phase1 extraction failed", "session", req.SessionID, "err", err)
@@ -287,6 +293,37 @@ func (s *Server) getMemory(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusOK, mem)
 }
 
+func (s *Server) getMemoryTrace(w http.ResponseWriter, r *http.Request) {
+	auth := authInfo(r)
+	svc := s.resolveServices(auth)
+
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			s.handleError(w, &domain.ValidationError{
+				Field:   "limit",
+				Message: "must be a positive integer",
+			})
+			return
+		}
+		limit = n
+	}
+
+	trace, err := svc.trace.Trace(
+		r.Context(),
+		chi.URLParam(r, "id"),
+		r.URL.Query().Get("q"),
+		limit,
+	)
+	if err != nil {
+		s.handleError(w, err)
+		return
+	}
+
+	respond(w, http.StatusOK, trace)
+}
+
 type updateMemoryRequest struct {
 	Content  string          `json:"content,omitempty"`
 	Tags     []string        `json:"tags,omitempty"`
@@ -411,6 +448,23 @@ type sessionMessageResponse struct {
 	UpdatedAt   time.Time          `json:"updated_at"`
 }
 
+func newSessionMessageResponse(sess *domain.Session) sessionMessageResponse {
+	return sessionMessageResponse{
+		ID:          sess.ID,
+		SessionID:   sess.SessionID,
+		AgentID:     sess.AgentID,
+		Source:      sess.Source,
+		Seq:         sess.Seq,
+		Role:        sess.Role,
+		Content:     sess.Content,
+		ContentType: sess.ContentType,
+		Tags:        sess.Tags,
+		State:       sess.State,
+		CreatedAt:   sess.CreatedAt,
+		UpdatedAt:   sess.UpdatedAt,
+	}
+}
+
 func (s *Server) handleListSessionMessages(w http.ResponseWriter, r *http.Request) {
 	auth := authInfo(r)
 	svc := s.resolveServices(auth)
@@ -454,25 +508,25 @@ func (s *Server) handleListSessionMessages(w http.ResponseWriter, r *http.Reques
 	}
 	messages := make([]sessionMessageResponse, len(sessions))
 	for i, sess := range sessions {
-		messages[i] = sessionMessageResponse{
-			ID:          sess.ID,
-			SessionID:   sess.SessionID,
-			AgentID:     sess.AgentID,
-			Source:      sess.Source,
-			Seq:         sess.Seq,
-			Role:        sess.Role,
-			Content:     sess.Content,
-			ContentType: sess.ContentType,
-			Tags:        sess.Tags,
-			State:       sess.State,
-			CreatedAt:   sess.CreatedAt,
-			UpdatedAt:   sess.UpdatedAt,
-		}
+		messages[i] = newSessionMessageResponse(sess)
 	}
 	respond(w, http.StatusOK, map[string]any{
 		"messages":          messages,
 		"limit_per_session": limitPerSession,
 	})
+}
+
+func (s *Server) handleGetSessionMessage(w http.ResponseWriter, r *http.Request) {
+	auth := authInfo(r)
+	svc := s.resolveServices(auth)
+
+	sessionMessage, err := svc.session.GetByID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		s.handleError(w, err)
+		return
+	}
+
+	respond(w, http.StatusOK, newSessionMessageResponse(sessionMessage))
 }
 
 func dedupStrings(ss []string) []string {

@@ -35,6 +35,36 @@ export interface Memory {
   relative_age?: string;
 }
 
+export interface RawSessionMessage {
+  id: string;
+  session_id?: string | null;
+  agent_id?: string | null;
+  source?: string | null;
+  seq: number;
+  role: string;
+  content: string;
+  content_type: string;
+  tags: string[];
+  state: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MemoryTraceEvidence {
+  id: string;
+  role: string;
+  content: string;
+  score?: number;
+  seq: number;
+}
+
+export interface MemoryTraceResult {
+  memory: Memory;
+  session_id: string;
+  query: string;
+  evidence: MemoryTraceEvidence[];
+}
+
 export interface SearchResult {
   data: Memory[];
   total: number;

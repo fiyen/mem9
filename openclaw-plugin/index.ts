@@ -4,10 +4,12 @@ import { registerHooks } from "./hooks.js";
 import type {
   PluginConfig,
   CreateMemoryInput,
+  MemoryTraceResult,
   UpdateMemoryInput,
   SearchInput,
   IngestInput,
   IngestResult,
+  RawSessionMessage,
 } from "./types.js";
 
 const DEFAULT_API_URL = "https://api.mem9.ai";
@@ -172,6 +174,68 @@ function buildTools(backend: MemoryBackend): AnyAgentTool[] {
     },
 
     {
+      name: "memory_trace",
+      label: "Trace Memory Evidence",
+      description:
+        "Resolve a memory id back to the most relevant original raw session evidence from its source conversation.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Memory id (UUID)" },
+          q: {
+            type: "string",
+            description: "Optional follow-up question to focus evidence recall",
+          },
+          limit: {
+            type: "number",
+            description: "Max evidence rows to return (default 5)",
+          },
+        },
+        required: ["id"],
+      },
+      async execute(_id: string, params: unknown) {
+        try {
+          const { id, q, limit } = params as { id: string; q?: string; limit?: number };
+          const result = await backend.trace(id, q, limit);
+          return jsonResult({ ok: true, data: result satisfies MemoryTraceResult });
+        } catch (err) {
+          return jsonResult({
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+    },
+
+    {
+      name: "memory_get_original",
+      label: "Get Original Node",
+      description: "Retrieve a raw session message by its node id.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Raw session node id (UUID)" },
+        },
+        required: ["id"],
+      },
+      async execute(_id: string, params: unknown) {
+        try {
+          const { id } = params as { id: string };
+          const result = await backend.getOriginal(id);
+          if (!result) {
+            return jsonResult({ ok: false, error: "session message not found" });
+          }
+          return jsonResult({ ok: true, data: result satisfies RawSessionMessage });
+        } catch (err) {
+          return jsonResult({
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+    },
+
+    {
       name: "memory_update",
       label: "Update Memory",
       description:
@@ -306,6 +370,8 @@ const toolNames = [
   "memory_store",
   "memory_search",
   "memory_get",
+  "memory_trace",
+  "memory_get_original",
   "memory_update",
   "memory_delete",
 ];
@@ -345,6 +411,12 @@ class LazyServerBackend implements MemoryBackend {
   }
   async get(id: string) {
     return (await this.resolve()).get(id);
+  }
+  async trace(id: string, q?: string, limit?: number) {
+    return (await this.resolve()).trace(id, q, limit);
+  }
+  async getOriginal(id: string) {
+    return (await this.resolve()).getOriginal(id);
   }
   async update(id: string, input: UpdateMemoryInput) {
     return (await this.resolve()).update(id, input);

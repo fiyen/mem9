@@ -31,6 +31,17 @@ func NewSessionRepo(db *sql.DB, autoModel string, ftsEnabled bool, clusterID str
 
 func (r *SessionRepo) FTSAvailable() bool { return r.ftsAvailable.Load() }
 
+func (r *SessionRepo) GetByID(ctx context.Context, id string) (*domain.Session, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT id, session_id, agent_id, source, seq, role, content, content_type,
+		content_hash, tags, state, created_at, updated_at
+		FROM sessions
+		WHERE id = ? AND state = 'active'`,
+		id,
+	)
+	return scanSessionDomainRowFromRow(row)
+}
+
 func (r *SessionRepo) BulkCreate(ctx context.Context, sessions []*domain.Session) error {
 	if len(sessions) == 0 {
 		return nil
@@ -396,6 +407,27 @@ func (r *SessionRepo) ListBySessionIDs(ctx context.Context, sessionIDs []string,
 	return scanSessionDomainRows(rows)
 }
 
+func (r *SessionRepo) ListRecentBySessionID(ctx context.Context, sessionID string, limit int) ([]*domain.Session, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, session_id, agent_id, source, seq, role, content, content_type,
+		content_hash, tags, state, created_at, updated_at
+		FROM sessions
+		WHERE session_id = ? AND state = 'active'
+		ORDER BY created_at DESC, seq DESC, id DESC
+		LIMIT ?`,
+		sessionID,
+		limit,
+	)
+	if err != nil {
+		if internaltenant.IsTableNotFoundError(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("sessions list recent by session id: cluster_id=%s: %w", r.clusterID, err)
+	}
+	defer rows.Close()
+	return scanSessionDomainRows(rows)
+}
+
 func scanSessionDomainRows(rows *sql.Rows) ([]*domain.Session, error) {
 	var result []*domain.Session
 	for rows.Next() {
@@ -406,6 +438,38 @@ func scanSessionDomainRows(rows *sql.Rows) ([]*domain.Session, error) {
 		result = append(result, s)
 	}
 	return result, rows.Err()
+}
+
+func scanSessionDomainRowFromRow(row *sql.Row) (*domain.Session, error) {
+	var (
+		sessionID, agentID, source, role, contentType, contentHash sql.NullString
+		tagsJSON                                                   []byte
+		state                                                      sql.NullString
+		s                                                          domain.Session
+	)
+	if err := row.Scan(
+		&s.ID, &sessionID, &agentID, &source,
+		&s.Seq, &role, &s.Content, &contentType,
+		&contentHash, &tagsJSON, &state,
+		&s.CreatedAt, &s.UpdatedAt,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, domain.ErrNotFound
+		}
+		return nil, fmt.Errorf("scan session domain row: %w", err)
+	}
+	s.SessionID = sessionID.String
+	s.AgentID = agentID.String
+	s.Source = source.String
+	s.Role = role.String
+	s.ContentType = contentType.String
+	s.ContentHash = contentHash.String
+	s.Tags = unmarshalTags(tagsJSON)
+	s.State = domain.MemoryState(state.String)
+	if s.State == "" {
+		s.State = domain.StateActive
+	}
+	return &s, nil
 }
 
 func scanSessionDomainRow(rows *sql.Rows) (*domain.Session, error) {

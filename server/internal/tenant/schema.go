@@ -59,6 +59,49 @@ DROP TRIGGER IF EXISTS trg_memories_updated ON memories;
 CREATE TRIGGER trg_memories_updated BEFORE UPDATE ON memories FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 `
 
+const TenantSessionsSchemaPostgres = `CREATE TABLE IF NOT EXISTS sessions (
+    id           VARCHAR(36)     PRIMARY KEY,
+    session_id   VARCHAR(100)    NULL,
+    agent_id     VARCHAR(100)    NULL,
+    source       VARCHAR(100)    NULL,
+    seq          INT             NOT NULL,
+    role         VARCHAR(20)     NOT NULL,
+    content      TEXT            NOT NULL,
+    content_type VARCHAR(20)     NOT NULL DEFAULT 'text',
+    content_hash VARCHAR(64)     NOT NULL,
+    tags         JSONB           NOT NULL DEFAULT '[]'::jsonb,
+    embedding    vector(1536)    NULL,
+    state        VARCHAR(20)     NOT NULL DEFAULT 'active',
+    created_at   TIMESTAMPTZ     DEFAULT NOW(),
+    updated_at   TIMESTAMPTZ     DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_session ON sessions(session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state);
+CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_dedup ON sessions(session_id, content_hash);
+CREATE OR REPLACE FUNCTION update_updated_at() RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_sessions_updated ON sessions;
+CREATE TRIGGER trg_sessions_updated BEFORE UPDATE ON sessions FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+`
+
+const TenantSessionTraceEmbeddingsSchemaPostgres = `CREATE TABLE IF NOT EXISTS session_trace_embeddings (
+    node_id         VARCHAR(36)     PRIMARY KEY,
+    session_id      VARCHAR(100)    NOT NULL,
+    content_hash    VARCHAR(64)     NOT NULL,
+    role            VARCHAR(20)     NOT NULL,
+    embedding_model VARCHAR(255)    NOT NULL,
+    embedding       vector(1536)    NOT NULL,
+    created_at      TIMESTAMPTZ     DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ     DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_session_trace_session ON session_trace_embeddings(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_trace_session_model ON session_trace_embeddings(session_id, embedding_model);
+CREATE OR REPLACE FUNCTION update_updated_at() RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_session_trace_embeddings_updated ON session_trace_embeddings;
+CREATE TRIGGER trg_session_trace_embeddings_updated BEFORE UPDATE ON session_trace_embeddings FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+`
+
 // TenantMemorySchemaDB9Base is the db9/PostgreSQL schema template with auto-embedding support.
 const TenantMemorySchemaDB9Base = `CREATE TABLE IF NOT EXISTS memories (
     id              VARCHAR(36)     PRIMARY KEY,
@@ -140,6 +183,19 @@ const TenantSessionsSchemaBase = `CREATE TABLE IF NOT EXISTS sessions (
     UNIQUE INDEX idx_sessions_dedup   (session_id, content_hash)
 )`
 
+const TenantSessionTraceEmbeddingsSchemaBase = `CREATE TABLE IF NOT EXISTS session_trace_embeddings (
+    node_id         VARCHAR(36)     PRIMARY KEY,
+    session_id      VARCHAR(100)    NOT NULL,
+    content_hash    VARCHAR(64)     NOT NULL,
+    role            VARCHAR(20)     NOT NULL,
+    embedding_model VARCHAR(255)    NOT NULL,
+    embedding       VECTOR(1536)    NOT NULL,
+    created_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_session_trace_session       (session_id),
+    INDEX idx_session_trace_session_model (session_id, embedding_model)
+)`
+
 // BuildSessionsSchema builds the TiDB sessions schema with optional auto-embedding.
 func BuildSessionsSchema(autoModel string, autoDims int) string {
 	var embeddingCol string
@@ -153,4 +209,16 @@ func BuildSessionsSchema(autoModel string, autoDims int) string {
 		embeddingCol = `embedding VECTOR(1536) NULL,`
 	}
 	return fmt.Sprintf(TenantSessionsSchemaBase, embeddingCol)
+}
+
+func BuildPostgresSessionsSchema() string {
+	return TenantSessionsSchemaPostgres
+}
+
+func BuildSessionTraceEmbeddingsSchema() string {
+	return TenantSessionTraceEmbeddingsSchemaBase
+}
+
+func BuildPostgresSessionTraceEmbeddingsSchema() string {
+	return TenantSessionTraceEmbeddingsSchemaPostgres
 }

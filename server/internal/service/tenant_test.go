@@ -58,6 +58,56 @@ func TestBuildMemorySchema(t *testing.T) {
 	})
 }
 
+func TestBuildPostgresSessionsSchema(t *testing.T) {
+	schema := tenant.BuildPostgresSessionsSchema()
+	checks := []string{
+		"CREATE TABLE IF NOT EXISTS sessions",
+		"embedding    vector(1536)",
+		"JSONB           NOT NULL DEFAULT '[]'::jsonb",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_dedup",
+		"CREATE TRIGGER trg_sessions_updated",
+	}
+
+	for _, needle := range checks {
+		if !strings.Contains(schema, needle) {
+			t.Fatalf("schema missing %q", needle)
+		}
+	}
+}
+
+func TestBuildPostgresSessionTraceEmbeddingsSchema(t *testing.T) {
+	schema := tenant.BuildPostgresSessionTraceEmbeddingsSchema()
+	checks := []string{
+		"CREATE TABLE IF NOT EXISTS session_trace_embeddings",
+		"embedding       vector(1536)",
+		"idx_session_trace_session",
+		"idx_session_trace_session_model",
+		"trg_session_trace_embeddings_updated",
+	}
+
+	for _, needle := range checks {
+		if !strings.Contains(schema, needle) {
+			t.Fatalf("schema missing %q", needle)
+		}
+	}
+}
+
+func TestBuildSessionTraceEmbeddingsSchema(t *testing.T) {
+	schema := tenant.BuildSessionTraceEmbeddingsSchema()
+	checks := []string{
+		"CREATE TABLE IF NOT EXISTS session_trace_embeddings",
+		"embedding       VECTOR(1536)",
+		"idx_session_trace_session",
+		"idx_session_trace_session_model",
+	}
+
+	for _, needle := range checks {
+		if !strings.Contains(schema, needle) {
+			t.Fatalf("schema missing %q", needle)
+		}
+	}
+}
+
 func TestProvisionRejectsNonTiDBBackend(t *testing.T) {
 	t.Parallel()
 
@@ -96,13 +146,13 @@ func TestProvision_WithEncryptor(t *testing.T) {
 	// Create mock provisioner that returns known password
 	mockProv := &mockProvisioner{
 		info: &tenant.ClusterInfo{
-			ID:       testTenantID,
+			ID:        testTenantID,
 			ClusterID: testTenantID,
-			Host:     "test-host",
-			Port:     4000,
-			Username: "root",
-			Password: testPassword,
-			DBName:   "test",
+			Host:      "test-host",
+			Port:      4000,
+			Username:  "root",
+			Password:  testPassword,
+			DBName:    "test",
 		},
 	}
 

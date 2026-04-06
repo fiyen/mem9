@@ -69,6 +69,14 @@ func (e *Embedder) Dims() int {
 	return e.dims
 }
 
+// Model returns the configured embedding model name.
+func (e *Embedder) Model() string {
+	if e == nil {
+		return ""
+	}
+	return e.model
+}
+
 // embeddingRequest is the OpenAI-compatible request body.
 type embeddingRequest struct {
 	Model          string `json:"model"`

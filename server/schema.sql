@@ -80,6 +80,19 @@ CREATE TABLE IF NOT EXISTS memories (
 --
 -- Set MNEMO_EMBED_AUTO_MODEL=tidbcloud_free/amazon/titan-embed-text-v2 to enable.
 
+CREATE TABLE IF NOT EXISTS session_trace_embeddings (
+  node_id         VARCHAR(36)     PRIMARY KEY,
+  session_id      VARCHAR(100)    NOT NULL,
+  content_hash    VARCHAR(64)     NOT NULL,
+  role            VARCHAR(20)     NOT NULL,
+  embedding_model VARCHAR(255)    NOT NULL,
+  embedding       VECTOR(1536)    NOT NULL,
+  created_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
+  updated_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_session_trace_session (session_id),
+  INDEX idx_session_trace_session_model (session_id, embedding_model)
+);
+
 
 -- Migration: tombstone -> state (4-step plan).
 -- Step 1: Add new columns (backward compatible — existing code still uses tombstone).

@@ -50,6 +50,41 @@ CREATE INDEX IF NOT EXISTS idx_memory_agent ON memories(agent_id);
 CREATE INDEX IF NOT EXISTS idx_memory_session ON memories(session_id);
 CREATE INDEX IF NOT EXISTS idx_memory_updated ON memories(updated_at);
 
+CREATE TABLE IF NOT EXISTS sessions (
+    id              VARCHAR(36)     PRIMARY KEY,
+    session_id      VARCHAR(100)    NULL,
+    agent_id        VARCHAR(100)    NULL,
+    source          VARCHAR(100)    NULL,
+    seq             INT             NOT NULL,
+    role            VARCHAR(20)     NOT NULL,
+    content         TEXT            NOT NULL,
+    content_type    VARCHAR(20)     NOT NULL DEFAULT 'text',
+    content_hash    VARCHAR(64)     NOT NULL,
+    tags            JSONB           NOT NULL DEFAULT '[]'::jsonb,
+    embedding       vector(1536)    NULL,
+    state           VARCHAR(20)     NOT NULL DEFAULT 'active',
+    created_at      TIMESTAMPTZ     DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ     DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_session ON sessions(session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state);
+CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_dedup ON sessions(session_id, content_hash);
+
+CREATE TABLE IF NOT EXISTS session_trace_embeddings (
+    node_id         VARCHAR(36)     PRIMARY KEY,
+    session_id      VARCHAR(100)    NOT NULL,
+    content_hash    VARCHAR(64)     NOT NULL,
+    role            VARCHAR(20)     NOT NULL,
+    embedding_model VARCHAR(255)    NOT NULL,
+    embedding       vector(1536)    NOT NULL,
+    created_at      TIMESTAMPTZ     DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ     DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_session_trace_session ON session_trace_embeddings(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_trace_session_model ON session_trace_embeddings(session_id, embedding_model);
+
 CREATE TABLE IF NOT EXISTS upload_tasks (
     task_id       VARCHAR(36)   PRIMARY KEY,
     tenant_id     VARCHAR(36)   NOT NULL,
@@ -81,6 +116,12 @@ CREATE TRIGGER trg_tenants_updated BEFORE UPDATE ON tenants FOR EACH ROW EXECUTE
 
 DROP TRIGGER IF EXISTS trg_memories_updated ON memories;
 CREATE TRIGGER trg_memories_updated BEFORE UPDATE ON memories FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+DROP TRIGGER IF EXISTS trg_sessions_updated ON sessions;
+CREATE TRIGGER trg_sessions_updated BEFORE UPDATE ON sessions FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+DROP TRIGGER IF EXISTS trg_session_trace_embeddings_updated ON session_trace_embeddings;
+CREATE TRIGGER trg_session_trace_embeddings_updated BEFORE UPDATE ON session_trace_embeddings FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 DROP TRIGGER IF EXISTS trg_upload_tasks_updated ON upload_tasks;
 CREATE TRIGGER trg_upload_tasks_updated BEFORE UPDATE ON upload_tasks FOR EACH ROW EXECUTE FUNCTION update_updated_at();

@@ -26,6 +26,10 @@ type SessionService struct {
 	autoModel string
 }
 
+type recentSessionLister interface {
+	ListRecentBySessionID(ctx context.Context, sessionID string, limit int) ([]*domain.Session, error)
+}
+
 func NewSessionService(sessions repository.SessionRepo, embedder *embed.Embedder, autoModel string) *SessionService {
 	return &SessionService{
 		sessions:  sessions,
@@ -36,6 +40,34 @@ func NewSessionService(sessions repository.SessionRepo, embedder *embed.Embedder
 
 func (s *SessionService) ListBySessionIDs(ctx context.Context, sessionIDs []string, limitPerSession int) ([]*domain.Session, error) {
 	return s.sessions.ListBySessionIDs(ctx, sessionIDs, limitPerSession)
+}
+
+func (s *SessionService) ListBySessionID(ctx context.Context, sessionID string) ([]*domain.Session, error) {
+	return s.sessions.ListBySessionID(ctx, sessionID)
+}
+
+func (s *SessionService) ListRecentBySessionID(ctx context.Context, sessionID string, limit int) ([]*domain.Session, error) {
+	lister, ok := s.sessions.(recentSessionLister)
+	if !ok {
+		return nil, fmt.Errorf("session messages: %w", domain.ErrNotSupported)
+	}
+	return lister.ListRecentBySessionID(ctx, sessionID, limit)
+}
+
+func (s *SessionService) ListTraceEmbeddingsBySessionID(ctx context.Context, sessionID string) ([]*domain.SessionTraceEmbedding, error) {
+	return s.sessions.ListTraceEmbeddingsBySessionID(ctx, sessionID)
+}
+
+func (s *SessionService) UpsertTraceEmbeddings(ctx context.Context, entries []*domain.SessionTraceEmbedding) error {
+	return s.sessions.UpsertTraceEmbeddings(ctx, entries)
+}
+
+func (s *SessionService) TraceVectorSearch(ctx context.Context, sessionID, embeddingModel string, queryVec []float32, limit int) ([]domain.Memory, error) {
+	return s.sessions.TraceVectorSearch(ctx, sessionID, embeddingModel, queryVec, limit)
+}
+
+func (s *SessionService) GetByID(ctx context.Context, id string) (*domain.Session, error) {
+	return s.sessions.GetByID(ctx, id)
 }
 
 func (s *SessionService) PatchTags(ctx context.Context, sessionID, contentHash string, tags []string) error {

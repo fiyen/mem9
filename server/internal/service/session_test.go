@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"math"
+	"sort"
 	"testing"
 
 	"github.com/qiffang/mnemos/server/internal/domain"
@@ -12,6 +14,14 @@ type stubSessionRepo struct {
 	bulkCreateCalled bool
 	bulkCreateErr    error
 	createdSessions  []*domain.Session
+	getByIDResult    *domain.Session
+	getByIDErr       error
+	sessionRows      []*domain.Session
+	sessionRowsErr   error
+	recentSessions   []*domain.Session
+	recentErr        error
+	recentSessionID  string
+	recentLimit      int
 
 	patchTagsCalled bool
 	patchTagsErr    error
@@ -19,21 +29,38 @@ type stubSessionRepo struct {
 	patchedHash     string
 	patchedTags     []string
 
-	keywordResults []domain.Memory
-	keywordErr     error
-	ftsResults     []domain.Memory
-	ftsErr         error
-	vecResults     []domain.Memory
-	vecErr         error
-	autoVecResults []domain.Memory
-	autoVecErr     error
-	ftsAvail       bool
+	keywordResults       []domain.Memory
+	keywordResultsByCall [][]domain.Memory
+	keywordErr           error
+	keywordQueries       []string
+	ftsResults           []domain.Memory
+	ftsErr               error
+	vecResults           []domain.Memory
+	vecErr               error
+	autoVecResults       []domain.Memory
+	autoVecErr           error
+	ftsAvail             bool
+	traceEmbeddings      map[string]*domain.SessionTraceEmbedding
+	traceSearchErr       error
+	traceSearchSessionID string
+	traceSearchModel     string
+	traceSearchLimit     int
+	traceUpsertCalls     int
+	traceUpserted        []*domain.SessionTraceEmbedding
 }
 
 func (s *stubSessionRepo) BulkCreate(_ context.Context, sessions []*domain.Session) error {
 	s.bulkCreateCalled = true
 	s.createdSessions = sessions
 	return s.bulkCreateErr
+}
+
+func (s *stubSessionRepo) GetByID(_ context.Context, _ string) (*domain.Session, error) {
+	return s.getByIDResult, s.getByIDErr
+}
+
+func (s *stubSessionRepo) ListBySessionID(_ context.Context, _ string) ([]*domain.Session, error) {
+	return s.sessionRows, s.sessionRowsErr
 }
 
 func (s *stubSessionRepo) PatchTags(_ context.Context, sessionID, contentHash string, tags []string) error {
@@ -56,14 +83,104 @@ func (s *stubSessionRepo) FTSSearch(_ context.Context, _ string, _ domain.Memory
 	return s.ftsResults, s.ftsErr
 }
 
-func (s *stubSessionRepo) KeywordSearch(_ context.Context, _ string, _ domain.MemoryFilter, _ int) ([]domain.Memory, error) {
+func (s *stubSessionRepo) KeywordSearch(_ context.Context, q string, _ domain.MemoryFilter, _ int) ([]domain.Memory, error) {
+	s.keywordQueries = append(s.keywordQueries, q)
+	if len(s.keywordResultsByCall) >= len(s.keywordQueries) {
+		return s.keywordResultsByCall[len(s.keywordQueries)-1], s.keywordErr
+	}
 	return s.keywordResults, s.keywordErr
 }
 
 func (s *stubSessionRepo) FTSAvailable() bool { return s.ftsAvail }
 
+func (s *stubSessionRepo) ListTraceEmbeddingsBySessionID(_ context.Context, _ string) ([]*domain.SessionTraceEmbedding, error) {
+	if len(s.traceEmbeddings) == 0 {
+		return nil, nil
+	}
+	result := make([]*domain.SessionTraceEmbedding, 0, len(s.traceEmbeddings))
+	for _, entry := range s.traceEmbeddings {
+		cp := *entry
+		cp.Embedding = nil
+		result = append(result, &cp)
+	}
+	return result, nil
+}
+
+func (s *stubSessionRepo) UpsertTraceEmbeddings(_ context.Context, entries []*domain.SessionTraceEmbedding) error {
+	s.traceUpsertCalls++
+	if s.traceEmbeddings == nil {
+		s.traceEmbeddings = make(map[string]*domain.SessionTraceEmbedding)
+	}
+	for _, entry := range entries {
+		cp := *entry
+		cp.Embedding = append([]float32(nil), entry.Embedding...)
+		s.traceEmbeddings[entry.NodeID] = &cp
+		s.traceUpserted = append(s.traceUpserted, &cp)
+	}
+	return nil
+}
+
+func (s *stubSessionRepo) TraceVectorSearch(_ context.Context, sessionID, embeddingModel string, queryVec []float32, limit int) ([]domain.Memory, error) {
+	if s.traceSearchErr != nil {
+		return nil, s.traceSearchErr
+	}
+	s.traceSearchSessionID = sessionID
+	s.traceSearchModel = embeddingModel
+	s.traceSearchLimit = limit
+
+	type scored struct {
+		mem   domain.Memory
+		score float64
+	}
+	scoredRows := make([]scored, 0, len(s.sessionRows))
+	for _, row := range s.sessionRows {
+		entry := s.traceEmbeddings[row.ID]
+		if entry == nil || entry.SessionID != sessionID || entry.EmbeddingModel != embeddingModel {
+			continue
+		}
+		score := cosineSimilarity(queryVec, entry.Embedding)
+		mem := domain.Memory{
+			ID:         row.ID,
+			Content:    row.Content,
+			MemoryType: domain.TypeSession,
+			Source:     row.Source,
+			Tags:       row.Tags,
+			AgentID:    row.AgentID,
+			SessionID:  row.SessionID,
+			State:      row.State,
+			CreatedAt:  row.CreatedAt,
+			UpdatedAt:  row.UpdatedAt,
+			Metadata:   mustTraceMetadata(row.Role, row.Seq, row.ContentType),
+		}
+		mem.Score = &score
+		scoredRows = append(scoredRows, scored{mem: mem, score: score})
+	}
+
+	sort.SliceStable(scoredRows, func(i, j int) bool {
+		if scoredRows[i].score == scoredRows[j].score {
+			return scoredRows[i].mem.ID < scoredRows[j].mem.ID
+		}
+		return scoredRows[i].score > scoredRows[j].score
+	})
+
+	if limit > len(scoredRows) {
+		limit = len(scoredRows)
+	}
+	result := make([]domain.Memory, 0, limit)
+	for i := 0; i < limit; i++ {
+		result = append(result, scoredRows[i].mem)
+	}
+	return result, nil
+}
+
 func (s *stubSessionRepo) ListBySessionIDs(_ context.Context, _ []string, _ int) ([]*domain.Session, error) {
 	return nil, nil
+}
+
+func (s *stubSessionRepo) ListRecentBySessionID(_ context.Context, sessionID string, limit int) ([]*domain.Session, error) {
+	s.recentSessionID = sessionID
+	s.recentLimit = limit
+	return s.recentSessions, s.recentErr
 }
 
 func newTestSessionService(repo *stubSessionRepo) *SessionService {
@@ -189,6 +306,31 @@ func TestSessionService_PatchTags_propagatesError(t *testing.T) {
 	}
 }
 
+func TestSessionService_GetByID_delegates(t *testing.T) {
+	expected := &domain.Session{ID: "msg-1", Content: "hello"}
+	repo := &stubSessionRepo{getByIDResult: expected}
+	svc := newTestSessionService(repo)
+
+	got, err := svc.GetByID(context.Background(), "msg-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil || got.ID != expected.ID || got.Content != expected.Content {
+		t.Fatalf("GetByID = %#v, want %#v", got, expected)
+	}
+}
+
+func TestSessionService_GetByID_propagatesError(t *testing.T) {
+	sentinel := errors.New("lookup fail")
+	repo := &stubSessionRepo{getByIDErr: sentinel}
+	svc := newTestSessionService(repo)
+
+	_, err := svc.GetByID(context.Background(), "msg-1")
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel error, got %v", err)
+	}
+}
+
 func TestSessionService_Search_keywordPath_returnsSessionType(t *testing.T) {
 	mem := domain.Memory{
 		ID:         "m1",
@@ -277,6 +419,12 @@ type capturingSessionRepo struct {
 func (c *capturingSessionRepo) BulkCreate(ctx context.Context, s []*domain.Session) error {
 	return c.stub.BulkCreate(ctx, s)
 }
+func (c *capturingSessionRepo) GetByID(ctx context.Context, id string) (*domain.Session, error) {
+	return c.stub.GetByID(ctx, id)
+}
+func (c *capturingSessionRepo) ListBySessionID(ctx context.Context, sessionID string) ([]*domain.Session, error) {
+	return c.stub.ListBySessionID(ctx, sessionID)
+}
 func (c *capturingSessionRepo) PatchTags(ctx context.Context, sid, hash string, tags []string) error {
 	return c.stub.PatchTags(ctx, sid, hash, tags)
 }
@@ -297,7 +445,40 @@ func (c *capturingSessionRepo) KeywordSearch(ctx context.Context, q string, f do
 	return c.stub.KeywordSearch(ctx, q, f, limit)
 }
 func (c *capturingSessionRepo) FTSAvailable() bool { return c.stub.FTSAvailable() }
+func (c *capturingSessionRepo) ListTraceEmbeddingsBySessionID(ctx context.Context, sessionID string) ([]*domain.SessionTraceEmbedding, error) {
+	return c.stub.ListTraceEmbeddingsBySessionID(ctx, sessionID)
+}
+func (c *capturingSessionRepo) UpsertTraceEmbeddings(ctx context.Context, entries []*domain.SessionTraceEmbedding) error {
+	return c.stub.UpsertTraceEmbeddings(ctx, entries)
+}
+func (c *capturingSessionRepo) TraceVectorSearch(ctx context.Context, sessionID, embeddingModel string, queryVec []float32, limit int) ([]domain.Memory, error) {
+	return c.stub.TraceVectorSearch(ctx, sessionID, embeddingModel, queryVec, limit)
+}
 
 func (c *capturingSessionRepo) ListBySessionIDs(ctx context.Context, ids []string, limit int) ([]*domain.Session, error) {
 	return c.stub.ListBySessionIDs(ctx, ids, limit)
+}
+
+func (c *capturingSessionRepo) ListRecentBySessionID(ctx context.Context, sessionID string, limit int) ([]*domain.Session, error) {
+	return c.stub.ListRecentBySessionID(ctx, sessionID, limit)
+}
+
+func cosineSimilarity(a, b []float32) float64 {
+	if len(a) == 0 || len(a) != len(b) {
+		return 0
+	}
+	var dot float64
+	var normA float64
+	var normB float64
+	for i := range a {
+		af := float64(a[i])
+		bf := float64(b[i])
+		dot += af * bf
+		normA += af * af
+		normB += bf * bf
+	}
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }

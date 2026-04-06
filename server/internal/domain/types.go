@@ -167,3 +167,15 @@ type Session struct {
 	CreatedAt   time.Time   `json:"created_at"`
 	UpdatedAt   time.Time   `json:"updated_at"`
 }
+
+// SessionTraceEmbedding stores a lazily-built embedding for a raw session node.
+type SessionTraceEmbedding struct {
+	NodeID         string
+	SessionID      string
+	ContentHash    string
+	Role           string
+	EmbeddingModel string
+	Embedding      []float32
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}

@@ -63,10 +63,10 @@ func NewMemoryRepo(backend string, db *sql.DB, autoModel string, ftsEnabled bool
 }
 
 // NewSessionRepo creates a SessionRepo for the specified backend.
-// Only TiDB has a sessions table; all other backends return a stub that
-// silently no-ops writes/searches and returns ErrNotSupported for reads.
 func NewSessionRepo(backend string, db *sql.DB, autoModel string, ftsEnabled bool, clusterID string) SessionRepo {
 	switch backend {
+	case "postgres":
+		return postgres.NewSessionRepo(db, ftsEnabled, clusterID)
 	case "tidb", "":
 		return tidb.NewSessionRepo(db, autoModel, ftsEnabled, clusterID)
 	default:
@@ -74,13 +74,16 @@ func NewSessionRepo(backend string, db *sql.DB, autoModel string, ftsEnabled boo
 	}
 }
 
-// stubSessionRepo satisfies SessionRepo for non-TiDB backends.
-// Write and search methods are silently skipped (consistent with the
-// IsTableNotFoundError no-op pattern). ListBySessionIDs returns ErrNotSupported
-// so the handler returns HTTP 501 instead of a misleading empty result.
+// stubSessionRepo satisfies SessionRepo for backends without session support.
 type stubSessionRepo struct{}
 
 func (stubSessionRepo) BulkCreate(_ context.Context, _ []*domain.Session) error { return nil }
+func (stubSessionRepo) GetByID(_ context.Context, _ string) (*domain.Session, error) {
+	return nil, fmt.Errorf("session message: %w", domain.ErrNotSupported)
+}
+func (stubSessionRepo) ListBySessionID(_ context.Context, _ string) ([]*domain.Session, error) {
+	return nil, fmt.Errorf("session messages: %w", domain.ErrNotSupported)
+}
 func (stubSessionRepo) PatchTags(_ context.Context, _, _ string, _ []string) error {
 	return nil
 }
@@ -97,6 +100,15 @@ func (stubSessionRepo) KeywordSearch(_ context.Context, _ string, _ domain.Memor
 	return nil, nil
 }
 func (stubSessionRepo) FTSAvailable() bool { return false }
+func (stubSessionRepo) ListTraceEmbeddingsBySessionID(_ context.Context, _ string) ([]*domain.SessionTraceEmbedding, error) {
+	return nil, fmt.Errorf("session trace embeddings: %w", domain.ErrNotSupported)
+}
+func (stubSessionRepo) UpsertTraceEmbeddings(_ context.Context, _ []*domain.SessionTraceEmbedding) error {
+	return fmt.Errorf("session trace embeddings: %w", domain.ErrNotSupported)
+}
+func (stubSessionRepo) TraceVectorSearch(_ context.Context, _, _ string, _ []float32, _ int) ([]domain.Memory, error) {
+	return nil, fmt.Errorf("session trace vector search: %w", domain.ErrNotSupported)
+}
 func (stubSessionRepo) ListBySessionIDs(_ context.Context, _ []string, _ int) ([]*domain.Session, error) {
 	return nil, fmt.Errorf("session messages: %w", domain.ErrNotSupported)
 }

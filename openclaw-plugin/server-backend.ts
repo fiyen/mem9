@@ -1,6 +1,8 @@
 import type { MemoryBackend } from "./backend.js";
 import type {
   Memory,
+  MemoryTraceResult,
+  RawSessionMessage,
   StoreResult,
   SearchResult,
   CreateMemoryInput,
@@ -90,6 +92,31 @@ export class ServerBackend implements MemoryBackend {
     } catch {
       return null;
     }
+  }
+
+  async trace(id: string, q?: string, limit?: number): Promise<MemoryTraceResult> {
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (limit != null) params.set("limit", String(limit));
+
+    const qs = params.toString();
+    return this.request<MemoryTraceResult>(
+      "GET",
+      `${this.memoryPath(`/memories/${id}/trace`)}${qs ? "?" + qs : ""}`,
+    );
+  }
+
+  async getOriginal(id: string): Promise<RawSessionMessage | null> {
+    const resp = await this.requestRaw("GET", this.memoryPath(`/session-messages/${id}`));
+    if (resp.status === 404) {
+      return null;
+    }
+
+    const data = await resp.json();
+    if (!resp.ok) {
+      throw new Error((data as { error?: string }).error || `HTTP ${resp.status}`);
+    }
+    return data as RawSessionMessage;
   }
 
   async update(id: string, input: UpdateMemoryInput): Promise<Memory | null> {

@@ -444,47 +444,8 @@ func (s *IngestService) extractFacts(ctx context.Context, conversation string) (
 		return nil, nil
 	}
 
-	systemPrompt, userPrompt := buildExtractFactsPrompts(conversation, time.Now())
+	currentDate := time.Now().Format("2006-01-02")
 
-	type extractResponse struct {
-		Facts []ExtractedFact `json:"facts"`
-	}
-
-	raw, err := s.llm.CompleteJSON(ctx, systemPrompt, userPrompt)
-	if err != nil {
-		return nil, fmt.Errorf("extraction LLM call: %w", err)
-	}
-
-	parsed, err := llm.ParseJSON[extractResponse](raw)
-	lastRaw := raw
-	if err != nil {
-		raw2, retryErr := s.llm.CompleteJSON(ctx, systemPrompt, buildJSONRepairPrompt(userPrompt, raw, err))
-		if retryErr != nil {
-			return nil, fmt.Errorf("extraction retry: %w", retryErr)
-		}
-		parsed, err = llm.ParseJSON[extractResponse](raw2)
-		if err != nil {
-			if recovered := normalizeParsedFacts(raw2, nil); len(recovered) > 0 {
-				facts := dropQueryIntentFacts(recovered)
-				slog.Info("facts extracted", "facts", len(facts))
-				return facts, nil
-			}
-			if s.llm.DebugLLM() {
-				slog.Error("json parse llm resp failed", "len", len(raw2), "raw", raw2, "err", err)
-			} else {
-				slog.Error("json parse llm resp failed", "len", len(raw2), "err", err)
-			}
-			return nil, fmt.Errorf("extraction parse after retry: %w", err)
-		}
-		lastRaw = raw2
-	}
-
-	facts := dropQueryIntentFacts(normalizeParsedFacts(lastRaw, parsed.Facts))
-	slog.Info("facts extracted", "facts", len(facts))
-	return facts, nil
-}
-
-func buildExtractFactsPrompts(conversation string, now time.Time) (string, string) {
 	systemPrompt := `You are an information extraction engine. Your task is to identify distinct,
 atomic facts from a conversation.
 
@@ -542,19 +503,137 @@ Return ONLY valid JSON. No markdown fences, no explanation.
 
 {"facts": [{"text": "fact one", "tags": ["tag1", "tag2"], "fact_type": "fact"}, {"text": "User asked about X", "fact_type": "query_intent"}, ...]}`
 
-	userPrompt := strings.Join([]string{
-		"Extract facts from the conversation below.",
-		"Conversation transcript:",
-		conversation,
-		"Reference date (use only when temporal context matters): " + now.Format("2006-01-02"),
-	}, "\n\n")
-	return systemPrompt, userPrompt
+	userPrompt := fmt.Sprintf("Extract facts. Today's date is %s.\n\n%s", currentDate, conversation)
+
+	type extractResponse struct {
+		Facts []ExtractedFact `json:"facts"`
+	}
+
+	raw, err := s.llm.CompleteJSON(ctx, systemPrompt, userPrompt)
+	if err != nil {
+		return nil, fmt.Errorf("extraction LLM call: %w", err)
+	}
+
+	parsed, err := llm.ParseJSON[extractResponse](raw)
+	lastRaw := raw
+	if err != nil {
+		raw2, retryErr := s.llm.CompleteJSON(ctx, systemPrompt,
+			"Your previous response was invalid JSON:\n"+raw+"\n\nFix it and return ONLY the corrected JSON object.\n\n"+userPrompt)
+		if retryErr != nil {
+			return nil, fmt.Errorf("extraction retry: %w", retryErr)
+		}
+		parsed, err = llm.ParseJSON[extractResponse](raw2)
+		if err != nil {
+			if recovered := normalizeParsedFacts(raw2, nil); len(recovered) > 0 {
+				facts := dropQueryIntentFacts(recovered)
+				slog.Info("facts extracted", "facts", len(facts))
+				return facts, nil
+			}
+			if s.llm.DebugLLM() {
+				slog.Error("json parse llm resp failed", "len", len(raw2), "raw", raw2, "err", err)
+			} else {
+				slog.Error("json parse llm resp failed", "len", len(raw2), "err", err)
+			}
+			return nil, fmt.Errorf("extraction parse after retry: %w", err)
+		}
+		lastRaw = raw2
+	}
+
+	facts := dropQueryIntentFacts(normalizeParsedFacts(lastRaw, parsed.Facts))
+	slog.Info("facts extracted", "facts", len(facts))
+	return facts, nil
 }
 
 // extractFactsAndTags calls the LLM to extract atomic facts and per-message tags
 // from the conversation in a single call.
 func (s *IngestService) extractFactsAndTags(ctx context.Context, conversation string, messageCount int) ([]ExtractedFact, [][]string, error) {
-	systemPrompt, userPrompt := buildExtractFactsAndTagsPrompts(conversation, messageCount, time.Now())
+	currentDate := time.Now().Format("2006-01-02")
+
+	systemPrompt := `You are an information extraction engine. Your task is to identify distinct,
+atomic facts from a conversation AND assign short descriptive tags to each message.
+
+## Rules — facts
+
+1. Extract facts ONLY from the user's messages. Ignore assistant and system messages entirely.
+2. Each fact must be a single, self-contained statement (one idea per fact).
+   Exception: when facts are semantically dependent (cause-effect, event-reason,
+   condition-outcome, temporal dependency), keep them as ONE fact preserving the
+   full relationship. Do not split dependent facts into separate entries.
+   Dependency markers: because, since, so that, in order to, unless, if…then,
+   因为, 所以, 为了, 由于, 导致, 如果, 虽然, 先…再…
+   - Good: "Joel went to rehearsal today because he has a bar performance on Sunday"
+   - Bad: "Joel went to rehearsal" + "Joel has a bar performance on Sunday"
+   - Good: "小强今天去彩排，因为他周日要去酒吧表演"
+   - Bad: "小强今天去彩排" + "小强周日要去酒吧表演"
+3. Prefer specific details over vague summaries.
+   - Good: "Uses Go 1.22 for backend services"
+   - Bad: "Knows some programming languages"
+4. Preserve the user's original language. If the user writes in Chinese, extract facts in Chinese.
+5. Omit ephemeral information (greetings, filler, debugging chatter with no lasting value).
+6. Do NOT extract search queries or lookup questions as facts.
+   If the user is asking the assistant to find, explain, or look something up
+   ("who is X", "how do I Y", "what does Z mean"), classify it as query_intent.
+   Only store what the user STATED about themselves, their work, or their world.
+   Heuristic: if the fact can only be known because the user asked, it is query_intent.
+   If it reveals something stable about the user independently, it is a fact.
+   Examples to skip (query_intent):
+     - "User asked about the history of the Ming dynasty"
+     - "User searched for how to configure nginx"
+   Examples to keep (fact):
+     - "Uses nginx as the production reverse proxy"
+     - "Working on a project that requires SQL window functions"
+7. Keep any stable personal information, preferences, experiences, relationships, or long-term plans
+   even if they arose in a task-specific context.
+8. Always include temporal context when mentioned. Preserve dates, times, and temporal markers.
+9. Extract relationships between people explicitly.
+10. Use specific names instead of pronouns when the referent is clear. Do not guess unclear references.
+   Replace pronouns (he, she, they, it, 他, 她, 他们) with the actual entity name so each
+   fact is self-contained and retrievable without needing context from other facts.
+   - Good: "Alice moved to Tokyo last year"
+   - Bad: "She moved to Tokyo last year"
+   - Good: "小强今天去彩排了"
+   - Bad: "他今天去彩排了"
+11. If no meaningful facts exist in the conversation, return an empty facts array.
+12. Assign 1-3 short lowercase tags to each extracted fact describing its topic or
+   category. Examples: "tech", "personal", "preference", "work", "location", "habit",
+   "relationship", "event", "timeline".
+   Use hyphens for multi-word tags. If no meaningful tags apply, omit the "tags" field.
+
+## Rules — message_tags
+
+1. Assign 1-3 short lowercase tags to EVERY message (user, assistant, tool, system).
+2. Tags describe the message topic or type. Use your own judgment — there is no fixed vocabulary.
+   Examples: "tech", "work", "personal", "preference", "location", "question",
+   "answer", "tool-call", "tool-result", "error", "code", "debug"
+3. Tags must be lowercase. Use hyphens for multi-word tags: "tool-call", "tool-result".
+4. Return exactly one array entry per message, in the same order as the input conversation.
+   If a message has no meaningful tags, return an empty array [] for it.
+
+## Examples
+
+Input:
+User: Hi, how are you?
+Assistant: I'm doing well, thank you! How can I help?
+Output: {"facts": [], "message_tags": [[], []]}
+
+Input:
+User: My name is Ming Zhang, I am a backend engineer, mainly using Go and Python.
+Assistant: Hi Ming Zhang!
+Output: {"facts": [{"text": "Name is Ming Zhang", "tags": ["personal"]}, {"text": "Is a backend engineer", "tags": ["work"]}, {"text": "Mainly uses Go and Python", "tags": ["tech"]}], "message_tags": [["personal", "work", "tech"], ["answer"]]}
+
+Input:
+User: I'm debugging a memory leak in our Go service.
+Assistant: Let's look at the heap profile. Can you share the pprof output?
+User: Here it is: [pprof data...]
+Output: {"facts": [{"text": "Debugging a memory leak in a Go service", "tags": ["tech", "debug"]}], "message_tags": [["tech", "debug", "go"], ["tech", "question", "debug"], ["tech", "tool-result", "code"]]}
+
+## Output Format
+
+Return ONLY valid JSON. No markdown fences, no explanation.
+
+{"facts": [{"text": "fact one", "tags": ["tag1", "tag2"], "fact_type": "fact"}, {"text": "User asked about X", "fact_type": "query_intent"}], "message_tags": [["tag1", "tag2"], ["tag3"], [], ...]}`
+
+	userPrompt := fmt.Sprintf("Extract facts and assign message tags. Today's date is %s.\n\n%s", currentDate, conversation)
 
 	type extractResponse struct {
 		Facts       []ExtractedFact `json:"facts"`
@@ -569,7 +648,8 @@ func (s *IngestService) extractFactsAndTags(ctx context.Context, conversation st
 	parsed, err := llm.ParseJSON[extractResponse](raw)
 	lastRaw := raw
 	if err != nil {
-		raw2, retryErr := s.llm.CompleteJSON(ctx, systemPrompt, buildJSONRepairPrompt(userPrompt, raw, err))
+		raw2, retryErr := s.llm.CompleteJSON(ctx, systemPrompt,
+			"Your previous response was invalid JSON:\n"+raw+"\n\nFix it and return ONLY the corrected JSON object.\n\n"+userPrompt)
 		if retryErr != nil {
 			return nil, nil, fmt.Errorf("extraction retry: %w", retryErr)
 		}
@@ -620,7 +700,6 @@ func (s *IngestService) extractFactsAndTags(ctx context.Context, conversation st
 	slog.Info("facts and tags extracted", "facts", len(facts), "tagged_messages", messageCount)
 	return facts, messageTags, nil
 }
-
 func buildExtractFactsAndTagsPrompts(conversation string, messageCount int, now time.Time) (string, string) {
 	systemPrompt := `You are an information extraction engine. Your task is to identify distinct,
 atomic facts from a conversation AND assign short descriptive tags to each message.
@@ -818,7 +897,6 @@ func (s *IngestService) reconcile(ctx context.Context, agentName, agentID, sessi
 - **ADD**: New info not in any existing memory. Also use ADD for a different attribute of the same entity.
 - **UPDATE**: Replaces the same attribute/slot of the same entity only. Keep the same ID.
 - **DELETE**: Explicitly contradicts an existing memory. Do NOT delete just because the new fact is less specific or incomplete.
-- **NOOP**: Already captured by an existing memory. No action needed.
 
 ## Rules
 
@@ -827,7 +905,7 @@ func (s *IngestService) reconcile(ctx context.Context, agentName, agentID, sessi
 3. For ADD, the "id" field is ignored by the system — set it to "new" or omit it.
 4. UPDATE only when the fact targets the same entity AND the same attribute slot. A new attribute of the same entity → ADD, not UPDATE.
 5. When the fact covers a topic not in any existing memory, use ADD.
-6. When the fact means the same thing as an existing memory (even if worded differently), use NOOP.
+6. Return ONLY delta actions. If a fact means the same thing as an existing memory (even if worded differently), omit it entirely. Do NOT emit NOOP entries.
 7. Preserve the language of the original facts. Do not translate.
 8. Each existing memory has an "age" field showing when it was last updated. Use age as a tiebreaker: when a new fact conflicts with an existing memory on the same topic and there is no other signal, older memories are more likely outdated. Age alone is NOT sufficient reason to UPDATE or DELETE — the content must also conflict or supersede the existing memory.
 
@@ -837,54 +915,62 @@ Assign 1-3 short lowercase tags to each ADD or UPDATE entry.
 Tags describe the topic or category of the memory.
 Examples: "tech", "personal", "preference", "work", "location", "habit"
 Use hyphens for multi-word tags: "programming-language", "work-tool".
-Omit the "tags" field entirely for NOOP and DELETE entries.
+Omit the "tags" field entirely for DELETE entries.
 
 ## Examples
 
 Example 1 — ADD new information:
   Existing memories: [{"id": 0, "text": "Is a software engineer", "age": "2 months ago"}]
   New facts: ["Name is John"]
-  Result: {"memory": [{"id": "0", "text": "Is a software engineer", "event": "NOOP"}, {"id": "new", "text": "Name is John", "event": "ADD", "tags": ["personal"]}]}
+  Result: {"changes": [{"id": "new", "text": "Name is John", "event": "ADD", "tags": ["personal"]}]}
 
 Example 2 — ADD different attribute of same entity (not UPDATE):
   Existing memories: [{"id": 0, "text": "Sarah is my sister", "age": "3 weeks ago"}, {"id": 1, "text": "Is a software engineer", "age": "2 months ago"}]
   New facts: ["Sarah lives in Osaka"]
-  Result: {"memory": [{"id": "0", "text": "Sarah is my sister", "event": "NOOP"}, {"id": "1", "text": "Is a software engineer", "event": "NOOP"}, {"id": "new", "text": "Sarah lives in Osaka", "event": "ADD", "tags": ["personal", "location"]}]}
+  Result: {"changes": [{"id": "new", "text": "Sarah lives in Osaka", "event": "ADD", "tags": ["personal", "location"]}]}
 
 Example 3 — DELETE contradicted information:
   Existing memories: [{"id": 0, "text": "Name is John", "age": "5 months ago"}, {"id": 1, "text": "Loves cheese pizza", "age": "3 months ago"}]
   New facts: ["Dislikes cheese pizza"]
-  Result: {"memory": [{"id": "0", "text": "Name is John", "event": "NOOP"}, {"id": "1", "text": "Loves cheese pizza", "event": "DELETE"}, {"id": "new", "text": "Dislikes cheese pizza", "event": "ADD", "tags": ["personal", "preference"]}]}
+  Result: {"changes": [{"id": "1", "text": "Loves cheese pizza", "event": "DELETE"}, {"id": "new", "text": "Dislikes cheese pizza", "event": "ADD", "tags": ["personal", "preference"]}]}
 
-Example 4 — NOOP for equivalent information:
+Example 4 — equivalent information produces no delta:
   Existing memories: [{"id": 0, "text": "Name is John", "age": "5 months ago"}, {"id": 1, "text": "Loves cheese pizza", "age": "3 months ago"}]
   New facts: ["Name is John"]
-  Result: {"memory": [{"id": "0", "text": "Name is John", "event": "NOOP"}, {"id": "1", "text": "Loves cheese pizza", "event": "NOOP"}]}
+  Result: {"changes": []}
 
 Example 5 — Age as tiebreaker for ambiguous conflicts:
   Existing memories: [{"id": 0, "text": "Prefers vim", "age": "1 year ago"}, {"id": 1, "text": "Works at startup X", "age": "8 months ago"}]
   New facts: ["Prefers VS Code", "Works at company Y"]
-  Result: {"memory": [{"id": "0", "text": "Prefers VS Code", "event": "UPDATE", "old_memory": "Prefers vim", "tags": ["tech", "preference"]}, {"id": "1", "text": "Works at company Y", "event": "UPDATE", "old_memory": "Works at startup X", "tags": ["work"]}]}
+  Result: {"changes": [{"id": "0", "text": "Prefers VS Code", "event": "UPDATE", "old_memory": "Prefers vim", "tags": ["tech", "preference"]}, {"id": "1", "text": "Works at company Y", "event": "UPDATE", "old_memory": "Works at startup X", "tags": ["work"]}]}
 
 Example 6 — Age does NOT trigger UPDATE without content conflict:
   Existing memories: [{"id": 0, "text": "Likes coffee", "age": "2 years ago"}]
   New facts: ["Enjoys coffee"]
-  Result: {"memory": [{"id": "0", "text": "Likes coffee", "event": "NOOP"}]}
+  Result: {"changes": []}
 
 ## Output Format
 
 Return ONLY valid JSON. No markdown fences.
+Return ONLY the delta actions needed to reconcile the new facts. Do not return unchanged memories.
 
 {
-  "memory": [
-    {"id": "0",   "text": "...",            "event": "NOOP"},
+  "changes": [
     {"id": "1",   "text": "updated text",   "event": "UPDATE", "old_memory": "original text", "tags": ["work"]},
     {"id": "2",   "text": "...",            "event": "DELETE"},
     {"id": "new", "text": "brand new fact", "event": "ADD",    "tags": ["tech"]}
   ]
 }`
 
-	userPrompt := buildReconcilePrompt(refsJSON, factsJSON)
+	userPrompt := fmt.Sprintf(`Current memory contents:
+
+%s
+
+New facts extracted from recent conversation:
+
+%s
+
+Analyze the new facts and determine only the delta actions needed. Do not return unchanged memories or NOOP entries.`, string(refsJSON), string(factsJSON))
 
 	raw, err := s.llm.CompleteJSON(ctx, systemPrompt, userPrompt)
 	if err != nil {
@@ -900,13 +986,15 @@ Return ONLY valid JSON. No markdown fences.
 		Tags      []string `json:"tags,omitempty"`
 	}
 	type reconcileResponse struct {
-		Memory []reconcileEvent `json:"memory"`
+		Changes []reconcileEvent `json:"changes"`
+		Memory  []reconcileEvent `json:"memory"`
 	}
 
 	parsed, err := llm.ParseJSON[reconcileResponse](raw)
 	if err != nil {
 		// Retry once.
-		raw2, retryErr := s.llm.CompleteJSON(ctx, systemPrompt, buildJSONRepairPrompt(userPrompt, raw, err))
+		raw2, retryErr := s.llm.CompleteJSON(ctx, systemPrompt,
+			"Your previous response was not valid JSON. Return ONLY the JSON object.\n\n"+userPrompt)
 		if retryErr != nil {
 			slog.Warn("reconciliation retry failed, skipping to avoid duplicates", "err", retryErr)
 			return nil, 1, nil // warnings=1 signals that facts were extracted but reconciliation was skipped
@@ -925,8 +1013,12 @@ Return ONLY valid JSON. No markdown fences.
 	// Step 4: Execute each action.
 	var resultIDs []string
 	var warnings int
+	events := parsed.Changes
+	if len(events) == 0 {
+		events = parsed.Memory
+	}
 
-	for _, event := range parsed.Memory {
+	for _, event := range events {
 		switch strings.ToUpper(event.Event) {
 		case "ADD":
 			if event.Text == "" {

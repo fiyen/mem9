@@ -240,47 +240,6 @@ func TestExtractFactsAndTagsRetryFallbackDropsFlattenedQueryIntent(t *testing.T)
 	}
 }
 
-func TestBuildExtractFactsPromptsKeepsStablePrefix(t *testing.T) {
-	t.Parallel()
-
-	systemPrompt, userPrompt := buildExtractFactsPrompts("User: I use Go 1.22", time.Date(2026, 4, 3, 0, 0, 0, 0, time.UTC))
-	if !strings.Contains(systemPrompt, "information extraction engine") {
-		t.Fatalf("unexpected system prompt: %q", systemPrompt)
-	}
-	if !strings.HasPrefix(userPrompt, "Extract facts from the conversation below.") {
-		t.Fatalf("user prompt should start with stable instructions, got %q", userPrompt)
-	}
-	conversationPos := strings.Index(userPrompt, "User: I use Go 1.22")
-	datePos := strings.Index(userPrompt, "Reference date (use only when temporal context matters): 2026-04-03")
-	if conversationPos < 0 || datePos < 0 {
-		t.Fatalf("expected prompt to contain conversation and date, got %q", userPrompt)
-	}
-	if datePos < conversationPos {
-		t.Fatalf("expected date to appear after conversation, got %q", userPrompt)
-	}
-}
-
-func TestBuildJSONRepairPromptPreservesPrefixAndTruncatesRaw(t *testing.T) {
-	t.Parallel()
-
-	original := "Extract facts from the conversation below.\n\nConversation transcript:\n\nUser: hello"
-	raw := strings.Repeat("x", 700)
-
-	got := buildJSONRepairPrompt(original, raw, errors.New("invalid character 'x'"))
-	if !strings.HasPrefix(got, original) {
-		t.Fatalf("repair prompt should keep original prompt prefix, got %q", got)
-	}
-	if !strings.Contains(got, "JSON parse error summary: invalid character 'x'") {
-		t.Fatalf("repair prompt should contain compact error summary, got %q", got)
-	}
-	if !strings.Contains(got, "...[truncated]") {
-		t.Fatalf("repair prompt should include truncated marker, got %q", got)
-	}
-	if strings.Contains(got, raw) {
-		t.Fatal("repair prompt should not embed the full raw response")
-	}
-}
-
 func TestColdStartAddAllFactsSetsTags(t *testing.T) {
 	t.Parallel()
 
@@ -349,6 +308,51 @@ func TestReconcileAddSetsTagsOnMemory(t *testing.T) {
 	_, err := svc.Ingest(context.Background(), "agent-1", IngestRequest{
 		Mode:      ModeSmart,
 		SessionID: "sess-add",
+		AgentID:   "agent-1",
+		Messages:  []IngestMessage{{Role: "user", Content: "I use Go 1.22"}},
+	})
+	if err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+	if len(memRepo.createCalls) != 1 {
+		t.Fatalf("expected 1 create call, got %d", len(memRepo.createCalls))
+	}
+	got := memRepo.createCalls[0].Tags
+	if len(got) != 2 || got[0] != "tech" || got[1] != "work" {
+		t.Fatalf("expected tags [tech work], got %v", got)
+	}
+}
+
+func TestReconcileAcceptsDeltaOnlyChangesSchema(t *testing.T) {
+	t.Parallel()
+
+	callCount := 0
+	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var resp string
+		if callCount == 1 {
+			resp = `{"facts": [{"text": "Uses Go 1.22", "tags": ["tech"]}]}`
+		} else {
+			resp = `{"changes": [{"id": "new", "text": "Uses Go 1.22", "event": "ADD", "tags": ["tech", "work"]}]}`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]string{"content": resp}}},
+		})
+	}))
+	defer mockLLM.Close()
+
+	llmClient := llm.New(llm.Config{APIKey: "test-key", BaseURL: mockLLM.URL, Model: "test-model"})
+	memRepo := &memoryRepoMock{
+		vectorResults: []domain.Memory{
+			{ID: "existing-1", Content: "Works remotely", MemoryType: domain.TypeInsight, State: domain.StateActive},
+		},
+	}
+	svc := NewIngestService(memRepo, llmClient, nil, "auto-model", ModeSmart)
+
+	_, err := svc.Ingest(context.Background(), "agent-1", IngestRequest{
+		Mode:      ModeSmart,
+		SessionID: "sess-add-changes",
 		AgentID:   "agent-1",
 		Messages:  []IngestMessage{{Role: "user", Content: "I use Go 1.22"}},
 	})
@@ -1725,6 +1729,68 @@ func TestReconcileIncludesMemoryAge(t *testing.T) {
 
 	if len(memRepo.createCalls) == 0 {
 		t.Fatal("expected ArchiveAndCreate to create a new memory")
+	}
+}
+
+func TestReconcilePromptRequestsDeltaOnly(t *testing.T) {
+	t.Parallel()
+
+	var reconcileBody string
+	var mu sync.Mutex
+
+	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		bodyStr := string(body)
+
+		var resp string
+		if strings.Contains(bodyStr, "Current memory contents:") {
+			mu.Lock()
+			reconcileBody = bodyStr
+			mu.Unlock()
+			resp = `{"memory": []}`
+		} else {
+			resp = `{"facts": [{"text": "Name is John", "tags": ["personal"]}]}`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]string{"content": resp}}},
+		})
+	}))
+	defer mockLLM.Close()
+
+	llmClient := llm.New(llm.Config{APIKey: "test-key", BaseURL: mockLLM.URL, Model: "test-model"})
+	memRepo := &memoryRepoMock{
+		vectorResults: []domain.Memory{
+			{ID: "mem-existing", Content: "Works remotely", MemoryType: domain.TypeInsight, State: domain.StateActive},
+		},
+	}
+	svc := NewIngestService(memRepo, llmClient, nil, "auto-model", ModeSmart)
+
+	_, err := svc.Ingest(context.Background(), "agent-1", IngestRequest{
+		Mode:      ModeSmart,
+		SessionID: "sess-delta",
+		AgentID:   "agent-1",
+		Messages:  []IngestMessage{{Role: "user", Content: "My name is John"}},
+	})
+	if err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+
+	mu.Lock()
+	body := reconcileBody
+	mu.Unlock()
+
+	if !strings.Contains(body, "Do not return unchanged memories or NOOP entries.") {
+		t.Fatalf("expected delta-only instruction in reconcile prompt, got: %s", body)
+	}
+	if !strings.Contains(body, `"changes"`) && !strings.Contains(body, `\"changes\"`) {
+		t.Fatalf("expected delta-only schema to use changes field, got: %s", body)
+	}
+	if strings.Contains(body, "Return the full memory state after reconciliation.") {
+		t.Fatalf("unexpected full-state instruction in reconcile prompt: %s", body)
+	}
+	if strings.Contains(body, `"memory": [`) || strings.Contains(body, `\"memory\": [`) {
+		t.Fatalf("unexpected legacy full-state schema in reconcile prompt: %s", body)
 	}
 }
 

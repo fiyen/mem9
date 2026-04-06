@@ -220,6 +220,9 @@ func (p *ZeroProvisioner) InitSchema(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, BuildSessionsSchema(p.autoModel, p.autoDims)); err != nil {
 		return fmt.Errorf("init schema: sessions table: %w", err)
 	}
+	if _, err := db.ExecContext(ctx, BuildSessionTraceEmbeddingsSchema()); err != nil {
+		return fmt.Errorf("init schema: session trace embeddings table: %w", err)
+	}
 	if p.autoModel != "" {
 		exists, err := IndexExists(ctx, db, "sessions", "idx_sessions_cosine")
 		if err != nil {

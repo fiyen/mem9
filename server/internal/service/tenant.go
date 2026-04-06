@@ -205,8 +205,35 @@ func (s *TenantService) GetInfo(ctx context.Context, tenantID string) (*domain.T
 }
 
 func (s *TenantService) EnsureSessionsTable(ctx context.Context, db *sql.DB) error {
+	backend := "tidb"
+	if s.pool != nil && s.pool.Backend() != "" {
+		backend = s.pool.Backend()
+	}
+
+	if backend == "postgres" {
+		if _, err := db.ExecContext(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+			return fmt.Errorf("ensure sessions table: vector extension: %w", err)
+		}
+		if _, err := db.ExecContext(ctx, tenant.BuildPostgresSessionsSchema()); err != nil {
+			return fmt.Errorf("ensure sessions table: create: %w", err)
+		}
+		if _, err := db.ExecContext(ctx, tenant.BuildPostgresSessionTraceEmbeddingsSchema()); err != nil {
+			return fmt.Errorf("ensure sessions table: create trace cache: %w", err)
+		}
+		if s.ftsEnabled {
+			if _, err := db.ExecContext(ctx,
+				`CREATE INDEX IF NOT EXISTS idx_sessions_fts ON sessions USING GIN (to_tsvector('english', content))`); err != nil {
+				return fmt.Errorf("ensure sessions table: fts index: %w", err)
+			}
+		}
+		return nil
+	}
+
 	if _, err := db.ExecContext(ctx, tenant.BuildSessionsSchema(s.autoModel, s.autoDims)); err != nil {
 		return fmt.Errorf("ensure sessions table: create: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, tenant.BuildSessionTraceEmbeddingsSchema()); err != nil {
+		return fmt.Errorf("ensure sessions table: create trace cache: %w", err)
 	}
 	if s.autoModel != "" {
 		exists, err := tenant.IndexExists(ctx, db, "sessions", "idx_sessions_cosine")

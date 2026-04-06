@@ -73,9 +73,35 @@ type resolvedSvc struct {
 	memory  *service.MemoryService
 	ingest  *service.IngestService
 	session *service.SessionService
+	trace   *service.TraceService
 }
 
 type tenantSvcKey string
+
+func (s *Server) ensureSessionsTableOnFirstUse(auth *domain.AuthInfo) {
+	if s.dbBackend == "postgres" {
+		if err := s.tenant.EnsureSessionsTable(context.Background(), auth.TenantDB); err != nil {
+			s.logger.Warn("sessions table migration failed",
+				"cluster_id", auth.ClusterID,
+				"tenant", auth.TenantID,
+				"err", err)
+		}
+		return
+	}
+
+	go func() {
+		if err := s.tenant.EnsureSessionsTable(context.Background(), auth.TenantDB); err != nil {
+			attrs := []any{
+				"cluster_id", auth.ClusterID,
+				"err", err,
+			}
+			if auth.TenantID != "" {
+				attrs = append(attrs, "tenant", auth.TenantID)
+			}
+			s.logger.Warn("sessions table migration failed", attrs...)
+		}
+	}()
+}
 
 // resolveServices returns the correct services for a request.
 func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
@@ -91,15 +117,10 @@ func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
 			ingest:  service.NewIngestService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
 			session: service.NewSessionService(sessRepo, s.embedder, s.autoModel),
 		}
+		svc.trace = service.NewTraceService(svc.memory, svc.session)
 		actual, loaded := s.svcCache.LoadOrStore(key, svc)
 		if !loaded {
-			go func() {
-				if err := s.tenant.EnsureSessionsTable(context.Background(), auth.TenantDB); err != nil {
-					s.logger.Warn("sessions table migration failed",
-						"cluster_id", auth.ClusterID,
-						"err", err) // no tenant field: TenantID is empty in this branch
-				}
-			}()
+			s.ensureSessionsTableOnFirstUse(auth)
 		}
 		return actual.(resolvedSvc)
 	}
@@ -114,16 +135,10 @@ func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
 		ingest:  service.NewIngestService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
 		session: service.NewSessionService(sessRepo, s.embedder, s.autoModel),
 	}
+	svc.trace = service.NewTraceService(svc.memory, svc.session)
 	actual, loaded := s.svcCache.LoadOrStore(key, svc)
 	if !loaded {
-		go func() {
-			if err := s.tenant.EnsureSessionsTable(context.Background(), auth.TenantDB); err != nil {
-				s.logger.Warn("sessions table migration failed",
-					"cluster_id", auth.ClusterID,
-					"tenant", auth.TenantID,
-					"err", err)
-			}
-		}()
+		s.ensureSessionsTableOnFirstUse(auth)
 	}
 	return actual.(resolvedSvc)
 }
@@ -161,6 +176,7 @@ func (s *Server) Router(
 		// Memory CRUD.
 		r.Post("/memories", s.createMemory)
 		r.Get("/memories", s.listMemories)
+		r.Get("/memories/{id}/trace", s.getMemoryTrace)
 		r.Get("/memories/{id}", s.getMemory)
 		r.Put("/memories/{id}", s.updateMemory)
 		r.Delete("/memories/{id}", s.deleteMemory)
@@ -172,6 +188,7 @@ func (s *Server) Router(
 
 		// Session messages (raw captured turns).
 		r.Get("/session-messages", s.handleListSessionMessages)
+		r.Get("/session-messages/{id}", s.handleGetSessionMessage)
 	})
 
 	r.Route("/v1alpha2/mem9s", func(r chi.Router) {
@@ -179,6 +196,7 @@ func (s *Server) Router(
 
 		r.Post("/memories", s.createMemory)
 		r.Get("/memories", s.listMemories)
+		r.Get("/memories/{id}/trace", s.getMemoryTrace)
 		r.Get("/memories/{id}", s.getMemory)
 		r.Put("/memories/{id}", s.updateMemory)
 		r.Delete("/memories/{id}", s.deleteMemory)
@@ -189,6 +207,7 @@ func (s *Server) Router(
 
 		// Session messages (raw captured turns).
 		r.Get("/session-messages", s.handleListSessionMessages)
+		r.Get("/session-messages/{id}", s.handleGetSessionMessage)
 	})
 
 	return r
