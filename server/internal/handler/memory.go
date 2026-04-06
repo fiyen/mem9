@@ -301,7 +301,7 @@ func (s *Server) getMemoryTrace(w http.ResponseWriter, r *http.Request) {
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 1 {
-			s.handleError(w, &domain.ValidationError{
+			s.handleError(r.Context(), w, &domain.ValidationError{
 				Field:   "limit",
 				Message: "must be a positive integer",
 			})
@@ -317,7 +317,7 @@ func (s *Server) getMemoryTrace(w http.ResponseWriter, r *http.Request) {
 		limit,
 	)
 	if err != nil {
-		s.handleError(w, err)
+		s.handleError(r.Context(), w, err)
 		return
 	}
 
@@ -522,7 +522,7 @@ func (s *Server) handleGetSessionMessage(w http.ResponseWriter, r *http.Request)
 
 	sessionMessage, err := svc.session.GetByID(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		s.handleError(w, err)
+		s.handleError(r.Context(), w, err)
 		return
 	}
 

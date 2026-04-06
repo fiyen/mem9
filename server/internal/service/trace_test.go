@@ -54,6 +54,7 @@ func (m *traceMemoryRepo) ListBootstrap(context.Context, int) ([]domain.Memory, 
 func (m *traceMemoryRepo) NearDupSearch(context.Context, string) (string, float64, error) {
 	return "", 0, nil
 }
+func (m *traceMemoryRepo) CountStats(context.Context) (int64, int64, error) { return 0, 0, nil }
 
 func TestTraceService_UsesSemanticSessionCacheAndPopulatesLazily(t *testing.T) {
 	embedSrv := newTraceEmbeddingServer(map[string][]float32{
