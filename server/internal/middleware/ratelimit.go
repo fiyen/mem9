@@ -52,6 +52,14 @@ func (rl *RateLimiter) Middleware() func(http.Handler) http.Handler {
 			if ip == "" {
 				ip = r.RemoteAddr
 			}
+			parsedIP := net.ParseIP(ip)
+
+			// Local debugging commonly runs browser, CLI, and server on the same host.
+			// Skip rate limiting for loopback requests so local workflows do not self-throttle.
+			if parsedIP != nil && parsedIP.IsLoopback() {
+				next.ServeHTTP(w, r)
+				return
+			}
 
 			if !rl.getLimiter(ip).Allow() {
 				writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
