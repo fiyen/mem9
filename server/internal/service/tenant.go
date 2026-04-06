@@ -21,6 +21,7 @@ type TenantService struct {
 	logger      *slog.Logger
 	autoModel   string
 	autoDims    int
+	embedDims   int
 	ftsEnabled  bool
 	encryptor   encrypt.Encryptor
 }
@@ -32,6 +33,7 @@ func NewTenantService(
 	logger *slog.Logger,
 	autoModel string,
 	autoDims int,
+	embedDims int,
 	ftsEnabled bool,
 	encryptor encrypt.Encryptor,
 ) *TenantService {
@@ -42,6 +44,7 @@ func NewTenantService(
 		logger:      logger,
 		autoModel:   autoModel,
 		autoDims:    autoDims,
+		embedDims:   embedDims,
 		ftsEnabled:  ftsEnabled,
 		encryptor:   encryptor,
 	}
@@ -217,7 +220,7 @@ func (s *TenantService) EnsureSessionsTable(ctx context.Context, db *sql.DB) err
 		if _, err := db.ExecContext(ctx, tenant.BuildPostgresSessionsSchema()); err != nil {
 			return fmt.Errorf("ensure sessions table: create: %w", err)
 		}
-		if _, err := db.ExecContext(ctx, tenant.BuildPostgresSessionTraceEmbeddingsSchema()); err != nil {
+		if _, err := db.ExecContext(ctx, tenant.BuildPostgresSessionTraceEmbeddingsSchema(s.embedDims)); err != nil {
 			return fmt.Errorf("ensure sessions table: create trace cache: %w", err)
 		}
 		if s.ftsEnabled {
@@ -232,7 +235,7 @@ func (s *TenantService) EnsureSessionsTable(ctx context.Context, db *sql.DB) err
 	if _, err := db.ExecContext(ctx, tenant.BuildSessionsSchema(s.autoModel, s.autoDims)); err != nil {
 		return fmt.Errorf("ensure sessions table: create: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, tenant.BuildSessionTraceEmbeddingsSchema()); err != nil {
+	if _, err := db.ExecContext(ctx, tenant.BuildSessionTraceEmbeddingsSchema(s.embedDims)); err != nil {
 		return fmt.Errorf("ensure sessions table: create trace cache: %w", err)
 	}
 	if s.autoModel != "" {

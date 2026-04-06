@@ -76,36 +76,54 @@ func TestBuildPostgresSessionsSchema(t *testing.T) {
 }
 
 func TestBuildPostgresSessionTraceEmbeddingsSchema(t *testing.T) {
-	schema := tenant.BuildPostgresSessionTraceEmbeddingsSchema()
-	checks := []string{
-		"CREATE TABLE IF NOT EXISTS session_trace_embeddings",
-		"embedding       vector(1536)",
-		"idx_session_trace_session",
-		"idx_session_trace_session_model",
-		"trg_session_trace_embeddings_updated",
-	}
-
-	for _, needle := range checks {
-		if !strings.Contains(schema, needle) {
-			t.Fatalf("schema missing %q", needle)
+	t.Run("uses configured dims", func(t *testing.T) {
+		schema := tenant.BuildPostgresSessionTraceEmbeddingsSchema(2048)
+		checks := []string{
+			"CREATE TABLE IF NOT EXISTS session_trace_embeddings",
+			"embedding       vector(2048)",
+			"idx_session_trace_session",
+			"idx_session_trace_session_model",
+			"trg_session_trace_embeddings_updated",
 		}
-	}
+
+		for _, needle := range checks {
+			if !strings.Contains(schema, needle) {
+				t.Fatalf("schema missing %q", needle)
+			}
+		}
+	})
+
+	t.Run("defaults to 1536 when unset", func(t *testing.T) {
+		schema := tenant.BuildPostgresSessionTraceEmbeddingsSchema(0)
+		if !strings.Contains(schema, "embedding       vector(1536)") {
+			t.Fatal("schema missing default vector(1536)")
+		}
+	})
 }
 
 func TestBuildSessionTraceEmbeddingsSchema(t *testing.T) {
-	schema := tenant.BuildSessionTraceEmbeddingsSchema()
-	checks := []string{
-		"CREATE TABLE IF NOT EXISTS session_trace_embeddings",
-		"embedding       VECTOR(1536)",
-		"idx_session_trace_session",
-		"idx_session_trace_session_model",
-	}
-
-	for _, needle := range checks {
-		if !strings.Contains(schema, needle) {
-			t.Fatalf("schema missing %q", needle)
+	t.Run("uses configured dims", func(t *testing.T) {
+		schema := tenant.BuildSessionTraceEmbeddingsSchema(2048)
+		checks := []string{
+			"CREATE TABLE IF NOT EXISTS session_trace_embeddings",
+			"embedding       VECTOR(2048)",
+			"idx_session_trace_session",
+			"idx_session_trace_session_model",
 		}
-	}
+
+		for _, needle := range checks {
+			if !strings.Contains(schema, needle) {
+				t.Fatalf("schema missing %q", needle)
+			}
+		}
+	})
+
+	t.Run("defaults to 1536 when unset", func(t *testing.T) {
+		schema := tenant.BuildSessionTraceEmbeddingsSchema(0)
+		if !strings.Contains(schema, "embedding       VECTOR(1536)") {
+			t.Fatal("schema missing default VECTOR(1536)")
+		}
+	})
 }
 
 func TestProvisionRejectsNonTiDBBackend(t *testing.T) {
@@ -115,7 +133,7 @@ func TestProvisionRejectsNonTiDBBackend(t *testing.T) {
 	defer pool.Close()
 
 	enc := encrypt.NewPlainEncryptor()
-	svc := NewTenantService(nil, nil, pool, nil, "", 0, false, enc)
+	svc := NewTenantService(nil, nil, pool, nil, "", 0, 1536, false, enc)
 	_, err := svc.Provision(context.Background())
 	if err == nil {
 		t.Fatal("expected validation error for non-tidb backend")
@@ -165,7 +183,7 @@ func TestProvision_WithEncryptor(t *testing.T) {
 
 	// Create service with a real logger (discard output)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := NewTenantService(mockRepo, mockProv, pool, logger, "", 0, false, enc)
+	svc := NewTenantService(mockRepo, mockProv, pool, logger, "", 0, 1536, false, enc)
 
 	// Call Provision
 	_, err := svc.Provision(context.Background())

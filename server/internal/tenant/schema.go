@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+const defaultEmbeddingDims = 1536
+
 // TenantMemorySchemaBase is the MySQL/TiDB schema template.
 const TenantMemorySchemaBase = `CREATE TABLE IF NOT EXISTS memories (
     id              VARCHAR(36)     PRIMARY KEY,
@@ -85,13 +87,13 @@ DROP TRIGGER IF EXISTS trg_sessions_updated ON sessions;
 CREATE TRIGGER trg_sessions_updated BEFORE UPDATE ON sessions FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 `
 
-const TenantSessionTraceEmbeddingsSchemaPostgres = `CREATE TABLE IF NOT EXISTS session_trace_embeddings (
+const TenantSessionTraceEmbeddingsSchemaPostgresBase = `CREATE TABLE IF NOT EXISTS session_trace_embeddings (
     node_id         VARCHAR(36)     PRIMARY KEY,
     session_id      VARCHAR(100)    NOT NULL,
     content_hash    VARCHAR(64)     NOT NULL,
     role            VARCHAR(20)     NOT NULL,
     embedding_model VARCHAR(255)    NOT NULL,
-    embedding       vector(1536)    NOT NULL,
+    embedding       vector(%d)    NOT NULL,
     created_at      TIMESTAMPTZ     DEFAULT NOW(),
     updated_at      TIMESTAMPTZ     DEFAULT NOW()
 );
@@ -189,7 +191,7 @@ const TenantSessionTraceEmbeddingsSchemaBase = `CREATE TABLE IF NOT EXISTS sessi
     content_hash    VARCHAR(64)     NOT NULL,
     role            VARCHAR(20)     NOT NULL,
     embedding_model VARCHAR(255)    NOT NULL,
-    embedding       VECTOR(1536)    NOT NULL,
+    embedding       VECTOR(%d)    NOT NULL,
     created_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_session_trace_session       (session_id),
@@ -215,10 +217,17 @@ func BuildPostgresSessionsSchema() string {
 	return TenantSessionsSchemaPostgres
 }
 
-func BuildSessionTraceEmbeddingsSchema() string {
-	return TenantSessionTraceEmbeddingsSchemaBase
+func BuildSessionTraceEmbeddingsSchema(embeddingDims int) string {
+	return fmt.Sprintf(TenantSessionTraceEmbeddingsSchemaBase, normalizeEmbeddingDims(embeddingDims))
 }
 
-func BuildPostgresSessionTraceEmbeddingsSchema() string {
-	return TenantSessionTraceEmbeddingsSchemaPostgres
+func BuildPostgresSessionTraceEmbeddingsSchema(embeddingDims int) string {
+	return fmt.Sprintf(TenantSessionTraceEmbeddingsSchemaPostgresBase, normalizeEmbeddingDims(embeddingDims))
+}
+
+func normalizeEmbeddingDims(embeddingDims int) int {
+	if embeddingDims <= 0 {
+		return defaultEmbeddingDims
+	}
+	return embeddingDims
 }

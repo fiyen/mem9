@@ -115,17 +115,19 @@ type ZeroProvisioner struct {
 	backend    string
 	autoModel  string
 	autoDims   int
+	embedDims  int
 	ftsEnabled bool
 }
 
 // NewZeroProvisioner creates a provisioner for TiDB Zero API.
 // backend is "tidb", "postgres", or "db9".
-func NewZeroProvisioner(baseURL, backend, autoModel string, autoDims int, ftsEnabled bool) *ZeroProvisioner {
+func NewZeroProvisioner(baseURL, backend, autoModel string, autoDims, embedDims int, ftsEnabled bool) *ZeroProvisioner {
 	return &ZeroProvisioner{
 		client:     NewZeroClient(baseURL),
 		backend:    backend,
 		autoModel:  autoModel,
 		autoDims:   autoDims,
+		embedDims:  embedDims,
 		ftsEnabled: ftsEnabled,
 	}
 }
@@ -220,7 +222,7 @@ func (p *ZeroProvisioner) InitSchema(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, BuildSessionsSchema(p.autoModel, p.autoDims)); err != nil {
 		return fmt.Errorf("init schema: sessions table: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, BuildSessionTraceEmbeddingsSchema()); err != nil {
+	if _, err := db.ExecContext(ctx, BuildSessionTraceEmbeddingsSchema(p.embedDims)); err != nil {
 		return fmt.Errorf("init schema: session trace embeddings table: %w", err)
 	}
 	if p.autoModel != "" {
